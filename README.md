@@ -1,21 +1,46 @@
-# TanStack Start + shadcn/ui
+# Claude Managed Agent Session Console
 
-This is a template for a new TanStack Start project with React, TypeScript, and shadcn/ui.
+Local verification console for Claude Managed Agent sessions.
 
-## Adding components
+## Setup
 
-To add components to your app, run the following command:
+Create `.env` from `.env.example`:
 
 ```bash
-npx shadcn@latest add button
+OMA_SERVER_URL=http://127.0.0.1:38080
+API_KEY=...
 ```
 
-This will place the ui components in the `components` directory.
+`API_KEY` is only read on the TanStack Start server side. The browser stores only UI preferences in `localStorage`: last agent id, environment id, and active session id.
 
-## Using components
+## Scripts
 
-To use the components in your app, import them as follows:
-
-```tsx
-import { Button } from "@/components/ui/button";
+```bash
+bun install
+bun run dev
+bun run typecheck
+bun run test
+bun run build
 ```
+
+The local SQLite database is created at `.data/oma-demo.sqlite`.
+
+## Default Debug IDs
+
+```text
+agent_PQ4fur0FFfQ55AQ5EZK4JJnY
+env_jB6LGpGDdxXAEbnShOGztgsF
+```
+
+## Notes
+
+The app uses TanStack Start server functions for the local API boundary. Those functions create the Anthropic SDK client with:
+
+```ts
+new Anthropic({
+  baseURL: process.env.OMA_SERVER_URL,
+  apiKey: process.env.API_KEY,
+})
+```
+
+The UI supports local session indexing, persisted session events, pending tool confirmations, custom tool results, sync, and a raw debug drawer.
