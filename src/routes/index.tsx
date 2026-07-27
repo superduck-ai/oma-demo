@@ -9,15 +9,21 @@ import {
   ChevronRightIcon,
   CodeIcon,
   DatabaseIcon,
+  FileKey2Icon,
+  FilePlus2Icon,
+  FileTextIcon,
   KeyRoundIcon,
   Loader2Icon,
   MessageSquareIcon,
+  PencilIcon,
   PlugZapIcon,
+  PlusIcon,
   RefreshCcwIcon,
   SendIcon,
   ShieldCheckIcon,
   SquareIcon,
   TerminalIcon,
+  Trash2Icon,
   XIcon,
 } from "lucide-react"
 import * as React from "react"
@@ -33,6 +39,14 @@ import {
   CardHeader,
   CardTitle,
 } from "@/components/ui/card"
+import {
+  Dialog,
+  DialogContent,
+  DialogDescription,
+  DialogFooter,
+  DialogHeader,
+  DialogTitle,
+} from "@/components/ui/dialog"
 import { Input } from "@/components/ui/input"
 import { Label } from "@/components/ui/label"
 import {
@@ -44,6 +58,13 @@ import {
   MessageScrollerViewport,
 } from "@/components/ui/message-scroller"
 import { ScrollArea } from "@/components/ui/scroll-area"
+import {
+  Select,
+  SelectContent,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select"
 import { Separator } from "@/components/ui/separator"
 import {
   Sheet,
@@ -59,9 +80,10 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
-import { DEFAULT_AGENT_ID, DEFAULT_ENVIRONMENT_ID } from "@/lib/managed-agents"
 import type {
+  ExistingFileSessionResource,
   JsonRecord,
+  MarkdownSessionResource,
   PendingAction,
   SessionDetailResponse,
   StoredSession,
@@ -71,6 +93,8 @@ import {
   createManagedSession,
   getAppConfig,
   getSessionDetail,
+  listAvailableManagedAgents,
+  listAvailableManagedEnvironments,
   listLocalSessions,
   sendCustomToolResult,
   sendSessionMessage,
@@ -82,6 +106,8 @@ import { cn } from "@/lib/utils"
 export const Route = createFileRoute("/")({ component: App })
 
 type TurnState = "idle" | "running" | "ended" | "error"
+type EditableMarkdownResource = MarkdownSessionResource & { id: string }
+type EditableFileResource = ExistingFileSessionResource & { id: string }
 
 const STORAGE_KEYS = {
   agentId: "oma-demo.agent-id",
@@ -92,6 +118,8 @@ const STORAGE_KEYS = {
 function App() {
   const queryClient = useQueryClient()
   const getConfigFn = useServerFn(getAppConfig)
+  const listAgentsFn = useServerFn(listAvailableManagedAgents)
+  const listEnvironmentsFn = useServerFn(listAvailableManagedEnvironments)
   const listSessionsFn = useServerFn(listLocalSessions)
   const getDetailFn = useServerFn(getSessionDetail)
   const createSessionFn = useServerFn(createManagedSession)
@@ -99,14 +127,34 @@ function App() {
   const sendMessageFn = useServerFn(sendSessionMessage)
   const confirmToolFn = useServerFn(sendToolConfirmation)
   const customToolResultFn = useServerFn(sendCustomToolResult)
-  const [agentId, setAgentId] = React.useState(DEFAULT_AGENT_ID)
-  const [environmentId, setEnvironmentId] = React.useState(
-    DEFAULT_ENVIRONMENT_ID
-  )
+  const [agentId, setAgentId] = React.useState("")
+  const [environmentId, setEnvironmentId] = React.useState("")
+  const [selectionHydrated, setSelectionHydrated] = React.useState(false)
   const [activeSessionId, setActiveSessionId] = React.useState<string | null>(
     null
   )
   const [title, setTitle] = React.useState("")
+  const [markdownResources, setMarkdownResources] = React.useState<
+    Array<EditableMarkdownResource>
+  >([])
+  const [fileResources, setFileResources] = React.useState<
+    Array<EditableFileResource>
+  >([])
+  const [resourceDialogOpen, setResourceDialogOpen] = React.useState(false)
+  const [editingResourceId, setEditingResourceId] = React.useState<
+    string | null
+  >(null)
+  const [resourceDraft, setResourceDraft] = React.useState(
+    newMarkdownResourceDraft()
+  )
+  const [fileResourceDialogOpen, setFileResourceDialogOpen] =
+    React.useState(false)
+  const [editingFileResourceId, setEditingFileResourceId] = React.useState<
+    string | null
+  >(null)
+  const [fileResourceDraft, setFileResourceDraft] = React.useState(
+    newExistingFileResourceDraft()
+  )
   const [message, setMessage] = React.useState(
     "请用一句话介绍当前 session 可以做什么。"
   )
@@ -121,20 +169,23 @@ function App() {
   const [turnState, setTurnState] = React.useState<TurnState>("idle")
 
   React.useEffect(() => {
-    setAgentId(localStorage.getItem(STORAGE_KEYS.agentId) || DEFAULT_AGENT_ID)
-    setEnvironmentId(
-      localStorage.getItem(STORAGE_KEYS.environmentId) || DEFAULT_ENVIRONMENT_ID
-    )
+    setAgentId(localStorage.getItem(STORAGE_KEYS.agentId) || "")
+    setEnvironmentId(localStorage.getItem(STORAGE_KEYS.environmentId) || "")
     setActiveSessionId(localStorage.getItem(STORAGE_KEYS.activeSessionId))
+    setSelectionHydrated(true)
   }, [])
 
   React.useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.agentId, agentId)
-  }, [agentId])
+    if (selectionHydrated && agentId) {
+      localStorage.setItem(STORAGE_KEYS.agentId, agentId)
+    }
+  }, [agentId, selectionHydrated])
 
   React.useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.environmentId, environmentId)
-  }, [environmentId])
+    if (selectionHydrated && environmentId) {
+      localStorage.setItem(STORAGE_KEYS.environmentId, environmentId)
+    }
+  }, [environmentId, selectionHydrated])
 
   React.useEffect(() => {
     if (activeSessionId) {
@@ -148,6 +199,51 @@ function App() {
     queryKey: ["config"],
     queryFn: () => getConfigFn(),
   })
+
+  const configReady =
+    configQuery.data?.apiKeyConfigured === true &&
+    configQuery.data.omaServerUrlConfigured === true
+
+  const agentsQuery = useQuery({
+    queryKey: ["managed-agents"],
+    queryFn: () => listAgentsFn(),
+    enabled: configReady,
+  })
+
+  const environmentsQuery = useQuery({
+    queryKey: ["managed-environments"],
+    queryFn: () => listEnvironmentsFn(),
+    enabled: configReady,
+  })
+
+  const agents = agentsQuery.data?.agents ?? []
+  const environments = environmentsQuery.data?.environments ?? []
+
+  React.useEffect(() => {
+    if (!selectionHydrated || !agentsQuery.data) {
+      return
+    }
+
+    setAgentId((current) =>
+      agentsQuery.data.agents.some((agent) => agent.id === current)
+        ? current
+        : (agentsQuery.data.agents[0]?.id ?? "")
+    )
+  }, [agentsQuery.data, selectionHydrated])
+
+  React.useEffect(() => {
+    if (!selectionHydrated || !environmentsQuery.data) {
+      return
+    }
+
+    setEnvironmentId((current) =>
+      environmentsQuery.data.environments.some(
+        (environment) => environment.id === current
+      )
+        ? current
+        : (environmentsQuery.data.environments[0]?.id ?? "")
+    )
+  }, [environmentsQuery.data, selectionHydrated])
 
   const sessionsQuery = useQuery({
     queryKey: ["sessions", agentId],
@@ -179,6 +275,17 @@ function App() {
           agentId,
           environmentId,
           title: title.trim() || undefined,
+          markdownResources: markdownResources.map(
+            ({ filename, mountPath, content }) => ({
+              filename,
+              mountPath,
+              content,
+            })
+          ),
+          fileResources: fileResources.map(({ fileId, mountPath }) => ({
+            fileId,
+            mountPath: mountPath?.trim() || undefined,
+          })),
         },
       })
 
@@ -188,6 +295,8 @@ function App() {
 
       setActiveSessionId(response.session.id)
       setTitle("")
+      setMarkdownResources([])
+      setFileResources([])
       await queryClient.invalidateQueries({ queryKey: ["sessions", agentId] })
       await queryClient.invalidateQueries({
         queryKey: ["session", response.session.id],
@@ -216,6 +325,75 @@ function App() {
     } finally {
       setBusyLabel(null)
     }
+  }
+
+  function openNewMarkdownResource() {
+    setEditingResourceId(null)
+    setResourceDraft(newMarkdownResourceDraft())
+    setResourceDialogOpen(true)
+  }
+
+  function openMarkdownResource(resource: EditableMarkdownResource) {
+    setEditingResourceId(resource.id)
+    setResourceDraft({
+      filename: resource.filename,
+      mountPath: resource.mountPath,
+      content: resource.content,
+    })
+    setResourceDialogOpen(true)
+  }
+
+  function saveMarkdownResource() {
+    const filename = normalizeMarkdownFilename(resourceDraft.filename)
+    const mountPath =
+      resourceDraft.mountPath?.trim() || `/${filename.replace(/^\/+/, "")}`
+    const nextResource = {
+      id: editingResourceId ?? crypto.randomUUID(),
+      filename,
+      mountPath,
+      content: resourceDraft.content,
+    }
+
+    setMarkdownResources((current) =>
+      editingResourceId
+        ? current.map((resource) =>
+            resource.id === editingResourceId ? nextResource : resource
+          )
+        : [...current, nextResource]
+    )
+    setResourceDialogOpen(false)
+  }
+
+  function openNewFileResource() {
+    setEditingFileResourceId(null)
+    setFileResourceDraft(newExistingFileResourceDraft())
+    setFileResourceDialogOpen(true)
+  }
+
+  function openFileResource(resource: EditableFileResource) {
+    setEditingFileResourceId(resource.id)
+    setFileResourceDraft({
+      fileId: resource.fileId,
+      mountPath: resource.mountPath,
+    })
+    setFileResourceDialogOpen(true)
+  }
+
+  function saveFileResource() {
+    const nextResource = {
+      id: editingFileResourceId ?? crypto.randomUUID(),
+      fileId: fileResourceDraft.fileId.trim(),
+      mountPath: fileResourceDraft.mountPath?.trim() || undefined,
+    }
+
+    setFileResources((current) =>
+      editingFileResourceId
+        ? current.map((resource) =>
+            resource.id === editingFileResourceId ? nextResource : resource
+          )
+        : [...current, nextResource]
+    )
+    setFileResourceDialogOpen(false)
   }
 
   async function sendMessage() {
@@ -300,9 +478,6 @@ function App() {
     }
   }
 
-  const configReady =
-    configQuery.data?.apiKeyConfigured === true &&
-    configQuery.data.omaServerUrlConfigured === true
   const canCreate =
     agentId.trim().length > 0 &&
     environmentId.trim().length > 0 &&
@@ -329,13 +504,19 @@ function App() {
                     <Button
                       size="icon-sm"
                       variant="outline"
-                      onClick={() => void configQuery.refetch()}
+                      onClick={() =>
+                        void Promise.all([
+                          configQuery.refetch(),
+                          agentsQuery.refetch(),
+                          environmentsQuery.refetch(),
+                        ])
+                      }
                     >
                       <RefreshCcwIcon />
                       <span className="sr-only">Refresh config</span>
                     </Button>
                   </TooltipTrigger>
-                  <TooltipContent>Refresh config</TooltipContent>
+                  <TooltipContent>Refresh config and catalogs</TooltipContent>
                 </Tooltip>
               </div>
 
@@ -355,22 +536,77 @@ function App() {
 
             <div className="space-y-3 border-b p-4">
               <div className="space-y-1.5">
-                <Label htmlFor="agent-id">Agent ID</Label>
-                <Input
-                  id="agent-id"
+                <div className="flex items-center justify-between gap-2">
+                  <Label htmlFor="agent-id">Agent</Label>
+                  <CatalogCount
+                    count={agents.length}
+                    fetching={agentsQuery.isFetching}
+                  />
+                </div>
+                <Select
                   value={agentId}
-                  spellCheck={false}
-                  onChange={(event) => setAgentId(event.target.value)}
-                />
+                  disabled={agents.length === 0}
+                  onValueChange={setAgentId}
+                >
+                  <SelectTrigger id="agent-id" className="w-full min-w-0">
+                    <SelectValue
+                      placeholder={catalogPlaceholder(
+                        agentsQuery,
+                        "No agents available"
+                      )}
+                    />
+                  </SelectTrigger>
+                  <SelectContent className="max-w-[min(28rem,calc(100vw-2rem))]">
+                    {agents.map((agent) => (
+                      <SelectItem
+                        key={agent.id}
+                        value={agent.id}
+                        detail={`${agent.id} · ${agent.model} · v${agent.version}`}
+                      >
+                        {agent.name || agent.id}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <CatalogSelectionMeta id={agentId} error={agentsQuery.error} />
               </div>
 
               <div className="space-y-1.5">
-                <Label htmlFor="environment-id">Environment ID</Label>
-                <Input
-                  id="environment-id"
+                <div className="flex items-center justify-between gap-2">
+                  <Label htmlFor="environment-id">Environment</Label>
+                  <CatalogCount
+                    count={environments.length}
+                    fetching={environmentsQuery.isFetching}
+                  />
+                </div>
+                <Select
                   value={environmentId}
-                  spellCheck={false}
-                  onChange={(event) => setEnvironmentId(event.target.value)}
+                  disabled={environments.length === 0}
+                  onValueChange={setEnvironmentId}
+                >
+                  <SelectTrigger id="environment-id" className="w-full min-w-0">
+                    <SelectValue
+                      placeholder={catalogPlaceholder(
+                        environmentsQuery,
+                        "No environments available"
+                      )}
+                    />
+                  </SelectTrigger>
+                  <SelectContent className="max-w-[min(28rem,calc(100vw-2rem))]">
+                    {environments.map((environment) => (
+                      <SelectItem
+                        key={environment.id}
+                        value={environment.id}
+                        detail={`${environment.id} · ${environment.environmentType}`}
+                      >
+                        {environment.name || environment.id}
+                      </SelectItem>
+                    ))}
+                  </SelectContent>
+                </Select>
+                <CatalogSelectionMeta
+                  id={environmentId}
+                  error={environmentsQuery.error}
                 />
               </div>
 
@@ -382,6 +618,129 @@ function App() {
                   placeholder="Optional"
                   onChange={(event) => setTitle(event.target.value)}
                 />
+              </div>
+
+              <div className="space-y-1.5">
+                <div className="flex items-center justify-between gap-2">
+                  <Label>Resources</Label>
+                  <div className="flex items-center gap-1">
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="outline"
+                      onClick={openNewFileResource}
+                    >
+                      <FileKey2Icon />
+                      File ID
+                    </Button>
+                    <Button
+                      type="button"
+                      size="xs"
+                      variant="outline"
+                      onClick={openNewMarkdownResource}
+                    >
+                      <PlusIcon />
+                      Markdown
+                    </Button>
+                  </div>
+                </div>
+                {markdownResources.length + fileResources.length > 0 ? (
+                  <div className="max-h-28 space-y-1 overflow-y-auto">
+                    {fileResources.map((resource) => (
+                      <div
+                        key={resource.id}
+                        className="flex items-center gap-2 rounded-md border px-2 py-1.5"
+                      >
+                        <FileKey2Icon className="size-3.5 shrink-0 text-muted-foreground" />
+                        <button
+                          type="button"
+                          className="min-w-0 flex-1 text-left"
+                          onClick={() => openFileResource(resource)}
+                        >
+                          <span className="block truncate text-xs font-medium">
+                            {resource.fileId}
+                          </span>
+                          <span className="block truncate text-[11px] text-muted-foreground">
+                            {resource.mountPath || "Default mount path"}
+                          </span>
+                        </button>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              type="button"
+                              size="icon-xs"
+                              variant="ghost"
+                              onClick={() =>
+                                setFileResources((current) =>
+                                  current.filter(
+                                    (item) => item.id !== resource.id
+                                  )
+                                )
+                              }
+                            >
+                              <Trash2Icon />
+                              <span className="sr-only">
+                                Remove {resource.fileId}
+                              </span>
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Remove resource</TooltipContent>
+                        </Tooltip>
+                      </div>
+                    ))}
+                    {markdownResources.map((resource) => (
+                      <div
+                        key={resource.id}
+                        className="flex items-center gap-2 rounded-md border px-2 py-1.5"
+                      >
+                        <FileTextIcon className="size-3.5 shrink-0 text-muted-foreground" />
+                        <button
+                          type="button"
+                          className="min-w-0 flex-1 text-left"
+                          onClick={() => openMarkdownResource(resource)}
+                        >
+                          <span className="block truncate text-xs font-medium">
+                            {resource.filename}
+                          </span>
+                          <span className="block truncate text-[11px] text-muted-foreground">
+                            {resource.mountPath}
+                          </span>
+                        </button>
+                        <Tooltip>
+                          <TooltipTrigger asChild>
+                            <Button
+                              type="button"
+                              size="icon-xs"
+                              variant="ghost"
+                              onClick={() =>
+                                setMarkdownResources((current) =>
+                                  current.filter(
+                                    (item) => item.id !== resource.id
+                                  )
+                                )
+                              }
+                            >
+                              <Trash2Icon />
+                              <span className="sr-only">
+                                Remove {resource.filename}
+                              </span>
+                            </Button>
+                          </TooltipTrigger>
+                          <TooltipContent>Remove resource</TooltipContent>
+                        </Tooltip>
+                      </div>
+                    ))}
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    className="flex w-full items-center gap-2 rounded-md border border-dashed px-2.5 py-2 text-left text-xs text-muted-foreground transition hover:bg-muted"
+                    onClick={openNewMarkdownResource}
+                  >
+                    <FilePlus2Icon className="size-3.5" />
+                    Add a file ID or generated Markdown
+                  </button>
+                )}
               </div>
 
               <Button
@@ -706,8 +1065,245 @@ function App() {
           </div>
         </section>
       </div>
+
+      <Dialog open={resourceDialogOpen} onOpenChange={setResourceDialogOpen}>
+        <DialogContent className="sm:max-w-2xl">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              {editingResourceId ? <PencilIcon /> : <FilePlus2Icon />}
+              {editingResourceId
+                ? "Edit Markdown resource"
+                : "Add Markdown resource"}
+            </DialogTitle>
+            <DialogDescription>
+              The content is generated in memory, uploaded through the Files
+              API, and mounted when the session is created.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-4 sm:grid-cols-2">
+            <div className="space-y-1.5">
+              <Label htmlFor="resource-filename">Filename</Label>
+              <Input
+                id="resource-filename"
+                value={resourceDraft.filename}
+                spellCheck={false}
+                onChange={(event) => {
+                  const previousFilename = normalizeMarkdownFilename(
+                    resourceDraft.filename
+                  )
+                  const nextFilename = event.target.value
+                  setResourceDraft((current) => ({
+                    ...current,
+                    filename: nextFilename,
+                    mountPath:
+                      current.mountPath === `/${previousFilename}`
+                        ? `/${normalizeMarkdownFilename(nextFilename)}`
+                        : current.mountPath,
+                  }))
+                }}
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="resource-mount-path">Mount path</Label>
+              <Input
+                id="resource-mount-path"
+                value={resourceDraft.mountPath}
+                spellCheck={false}
+                onChange={(event) =>
+                  setResourceDraft((current) => ({
+                    ...current,
+                    mountPath: event.target.value,
+                  }))
+                }
+              />
+            </div>
+            <div className="space-y-1.5 sm:col-span-2">
+              <Label htmlFor="resource-content">Markdown</Label>
+              <Textarea
+                id="resource-content"
+                className="min-h-72 resize-y font-mono text-xs"
+                value={resourceDraft.content}
+                spellCheck={false}
+                onChange={(event) =>
+                  setResourceDraft((current) => ({
+                    ...current,
+                    content: event.target.value,
+                  }))
+                }
+              />
+            </div>
+          </div>
+
+          <DialogFooter showCloseButton>
+            <Button
+              disabled={!isMarkdownResourceDraftValid(resourceDraft)}
+              onClick={saveMarkdownResource}
+            >
+              <CheckIcon />
+              {editingResourceId ? "Save changes" : "Add resource"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
+
+      <Dialog
+        open={fileResourceDialogOpen}
+        onOpenChange={setFileResourceDialogOpen}
+      >
+        <DialogContent className="sm:max-w-lg">
+          <DialogHeader>
+            <DialogTitle className="flex items-center gap-2">
+              {editingFileResourceId ? <PencilIcon /> : <FileKey2Icon />}
+              {editingFileResourceId
+                ? "Edit file resource"
+                : "Add file resource"}
+            </DialogTitle>
+            <DialogDescription>
+              Mount an existing Files API object when the session is created.
+            </DialogDescription>
+          </DialogHeader>
+
+          <div className="grid gap-4">
+            <div className="space-y-1.5">
+              <Label htmlFor="file-resource-id">File ID</Label>
+              <Input
+                id="file-resource-id"
+                value={fileResourceDraft.fileId}
+                placeholder="file_..."
+                spellCheck={false}
+                onChange={(event) =>
+                  setFileResourceDraft((current) => ({
+                    ...current,
+                    fileId: event.target.value,
+                  }))
+                }
+              />
+            </div>
+            <div className="space-y-1.5">
+              <Label htmlFor="file-resource-mount-path">Mount path</Label>
+              <Input
+                id="file-resource-mount-path"
+                value={fileResourceDraft.mountPath ?? ""}
+                placeholder="/data/input.md (optional)"
+                spellCheck={false}
+                onChange={(event) =>
+                  setFileResourceDraft((current) => ({
+                    ...current,
+                    mountPath: event.target.value,
+                  }))
+                }
+              />
+            </div>
+          </div>
+
+          <DialogFooter showCloseButton>
+            <Button
+              disabled={!isExistingFileResourceDraftValid(fileResourceDraft)}
+              onClick={saveFileResource}
+            >
+              <CheckIcon />
+              {editingFileResourceId ? "Save changes" : "Add resource"}
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </main>
   )
+}
+
+function newMarkdownResourceDraft(): MarkdownSessionResource {
+  return {
+    filename: "context.md",
+    mountPath: "/context.md",
+    content: "# Session Context\n\n",
+  }
+}
+
+function newExistingFileResourceDraft(): ExistingFileSessionResource {
+  return {
+    fileId: "",
+    mountPath: "",
+  }
+}
+
+function normalizeMarkdownFilename(filename: string) {
+  const trimmed = filename.trim()
+  if (!trimmed) {
+    return ""
+  }
+  return /\.md$/i.test(trimmed) ? trimmed : `${trimmed}.md`
+}
+
+function isMarkdownResourceDraftValid(resource: MarkdownSessionResource) {
+  const filename = normalizeMarkdownFilename(resource.filename)
+  const mountPath = resource.mountPath?.trim() ?? ""
+
+  return (
+    filename.length > 3 &&
+    filename.length <= 255 &&
+    !/[<>:"|?*\/\\\x00-\x1f]/.test(filename.replace(/\.md$/i, "")) &&
+    mountPath.startsWith("/") &&
+    mountPath.length <= 1024 &&
+    !mountPath.split("/").some((segment) => segment === "..") &&
+    resource.content.length <= 10_000_000
+  )
+}
+
+function isExistingFileResourceDraftValid(
+  resource: ExistingFileSessionResource
+) {
+  const mountPath = resource.mountPath?.trim() ?? ""
+
+  return (
+    /^file_[A-Za-z0-9]+$/.test(resource.fileId.trim()) &&
+    (mountPath.length === 0 ||
+      (mountPath.startsWith("/") &&
+        mountPath.length <= 1024 &&
+        !mountPath.split("/").some((segment) => segment === "..")))
+  )
+}
+
+function CatalogCount({
+  count,
+  fetching,
+}: {
+  count: number
+  fetching: boolean
+}) {
+  return (
+    <span className="flex items-center gap-1 text-[10px] text-muted-foreground tabular-nums">
+      {fetching ? <Loader2Icon className="size-3 animate-spin" /> : null}
+      {count}
+    </span>
+  )
+}
+
+function CatalogSelectionMeta({ id, error }: { id: string; error: unknown }) {
+  if (error) {
+    return (
+      <p className="line-clamp-2 text-[10px] leading-4 text-destructive">
+        {errorMessage(error)}
+      </p>
+    )
+  }
+
+  return id ? (
+    <p className="truncate font-mono text-[10px] text-muted-foreground">{id}</p>
+  ) : null
+}
+
+function catalogPlaceholder(
+  query: { isLoading: boolean; isError: boolean },
+  emptyLabel: string
+) {
+  if (query.isLoading) {
+    return "Loading..."
+  }
+  if (query.isError) {
+    return "Failed to load"
+  }
+  return emptyLabel
 }
 
 function ConfigBadge({
@@ -786,13 +1382,19 @@ function MessageComposer({
             aria-label="Message"
             value={value}
             disabled={disabled}
-            placeholder="Message this session..."
+            placeholder="Message this session... (Enter to send, Shift+Enter for newline)"
             className="max-h-40 min-h-20 resize-none overflow-y-auto border-0 bg-transparent py-3 pr-14 pl-3 shadow-none focus-visible:border-transparent focus-visible:ring-0 disabled:bg-transparent"
             onChange={(event) => onChange(event.target.value)}
             onKeyDown={(event) => {
-              if (event.key === "Enter" && (event.metaKey || event.ctrlKey)) {
+              if (
+                event.key === "Enter" &&
+                !event.shiftKey &&
+                !event.nativeEvent.isComposing
+              ) {
                 event.preventDefault()
-                onSubmit()
+                if (canSubmit) {
+                  onSubmit()
+                }
               }
             }}
           />

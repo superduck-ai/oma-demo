@@ -1,4 +1,3 @@
-import { DEFAULT_AGENT_ID, DEFAULT_ENVIRONMENT_ID } from "@/lib/managed-agents"
 import type { ApiErrorResponse } from "@/lib/managed-agents"
 
 import { getServerEnv, redactSecrets } from "./anthropic"
@@ -29,8 +28,6 @@ export function configResponse() {
   return {
     omaServerUrlConfigured: env.omaServerUrlConfigured,
     apiKeyConfigured: env.apiKeyConfigured,
-    defaultAgentId: DEFAULT_AGENT_ID,
-    defaultEnvironmentId: DEFAULT_ENVIRONMENT_ID,
   }
 }
 

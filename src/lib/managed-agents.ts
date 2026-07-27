@@ -1,6 +1,3 @@
-export const DEFAULT_AGENT_ID = "agent_PQ4fur0FFfQ55AQ5EZK4JJnY"
-export const DEFAULT_ENVIRONMENT_ID = "env_jB6LGpGDdxXAEbnShOGztgsF"
-
 export type SessionStatus =
   "rescheduling" | "running" | "idle" | "terminated" | "unknown"
 
@@ -17,8 +14,24 @@ export type JsonRecord = { [key: string]: JsonValue }
 export interface AppConfigResponse {
   omaServerUrlConfigured: boolean
   apiKeyConfigured: boolean
-  defaultAgentId: string
-  defaultEnvironmentId: string
+}
+
+export interface ManagedAgentOption {
+  id: string
+  name: string
+  description: string | null
+  model: string
+  version: number
+  updatedAt: string
+}
+
+export interface ManagedEnvironmentOption {
+  id: string
+  name: string
+  description: string
+  environmentType: "cloud" | "self_hosted"
+  scope: "organization" | "account" | null
+  updatedAt: string
 }
 
 export interface StoredSession {
@@ -68,6 +81,19 @@ export interface CreateSessionRequest {
   agentId: string
   environmentId: string
   title?: string
+  markdownResources?: Array<MarkdownSessionResource>
+  fileResources?: Array<ExistingFileSessionResource>
+}
+
+export interface MarkdownSessionResource {
+  filename: string
+  mountPath?: string
+  content: string
+}
+
+export interface ExistingFileSessionResource {
+  fileId: string
+  mountPath?: string
 }
 
 export interface SendMessageRequest {

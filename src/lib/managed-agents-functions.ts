@@ -3,11 +3,67 @@ import { z } from "zod"
 
 import type { JsonRecord, SessionDetailResponse } from "@/lib/managed-agents"
 
-const createSessionSchema = z.object({
-  agentId: z.string().min(1),
-  environmentId: z.string().min(1),
-  title: z.string().optional(),
-})
+const mountPathSchema = z
+  .string()
+  .trim()
+  .min(1)
+  .max(1024)
+  .refine(
+    (path) =>
+      path.startsWith("/") &&
+      !path.split("/").some((segment) => segment === ".."),
+    "Mount paths must be absolute and cannot contain '..'."
+  )
+
+const createSessionSchema = z
+  .object({
+    agentId: z.string().min(1),
+    environmentId: z.string().min(1),
+    title: z.string().optional(),
+    markdownResources: z
+      .array(
+        z.object({
+          filename: z
+            .string()
+            .trim()
+            .min(1)
+            .max(255)
+            .regex(
+              /^[^<>:"|?*\/\\\x00-\x1f]+\.md$/i,
+              "Markdown filenames must end in .md and contain no forbidden characters."
+            ),
+          mountPath: mountPathSchema.optional(),
+          content: z.string().max(10_000_000),
+        })
+      )
+      .optional(),
+    fileResources: z
+      .array(
+        z.object({
+          fileId: z
+            .string()
+            .trim()
+            .regex(
+              /^file_[A-Za-z0-9]+$/,
+              "File IDs must use the 'file_...' format."
+            ),
+          mountPath: mountPathSchema.optional(),
+        })
+      )
+      .optional(),
+  })
+  .superRefine((data, context) => {
+    const resourceCount =
+      (data.markdownResources?.length ?? 0) + (data.fileResources?.length ?? 0)
+
+    if (resourceCount > 500) {
+      context.addIssue({
+        code: "custom",
+        message: "A session can include at most 500 resources.",
+        path: ["fileResources"],
+      })
+    }
+  })
 
 const listSessionsSchema = z.object({
   agentId: z.string().optional(),
@@ -43,6 +99,38 @@ export const getAppConfig = createServerFn({ method: "GET" }).handler(
   }
 )
 
+export const listAvailableManagedAgents = createServerFn({
+  method: "GET",
+}).handler(async () => {
+  try {
+    const { getAnthropicClient } = await import("@/server/anthropic")
+    const { fetchManagedAgentOptions } =
+      await import("@/server/managed-resources")
+
+    return {
+      agents: await fetchManagedAgentOptions(getAnthropicClient()),
+    }
+  } catch (error) {
+    throw await clientSafeError(error)
+  }
+})
+
+export const listAvailableManagedEnvironments = createServerFn({
+  method: "GET",
+}).handler(async () => {
+  try {
+    const { getAnthropicClient } = await import("@/server/anthropic")
+    const { fetchManagedEnvironmentOptions } =
+      await import("@/server/managed-resources")
+
+    return {
+      environments: await fetchManagedEnvironmentOptions(getAnthropicClient()),
+    }
+  } catch (error) {
+    throw await clientSafeError(error)
+  }
+})
+
 export const listLocalSessions = createServerFn({ method: "GET" })
   .validator(listSessionsSchema)
   .handler(async ({ data }) => {
@@ -60,22 +148,50 @@ export const getSessionDetail = createServerFn({ method: "GET" })
 export const createManagedSession = createServerFn({ method: "POST" })
   .validator(createSessionSchema)
   .handler(async ({ data }) => {
+    let uploadedFileIds: Array<string> = []
+    let sessionCreated = false
+
     try {
       const { getAnthropicClient, MANAGED_AGENTS_BETAS } =
         await import("@/server/anthropic")
       const { getDb } = await import("@/server/db")
-      const session = await getAnthropicClient().beta.sessions.create({
+      const { mapExistingFileResources, uploadMarkdownResources } =
+        await import("@/server/session-resources")
+      const client = getAnthropicClient()
+      const uploadedResources = await uploadMarkdownResources(
+        client,
+        data.markdownResources ?? []
+      )
+      const sessionResources = [
+        ...uploadedResources.sessionResources,
+        ...mapExistingFileResources(data.fileResources ?? []),
+      ]
+      uploadedFileIds = uploadedResources.uploaded.map(
+        (resource) => resource.fileId
+      )
+      const session = await client.beta.sessions.create({
         agent: data.agentId,
         environment_id: data.environmentId,
         title: data.title?.trim() || null,
         metadata: {
           app: "oma-demo",
         },
+        ...(sessionResources.length > 0 ? { resources: sessionResources } : {}),
         betas: MANAGED_AGENTS_BETAS,
       })
+      sessionCreated = true
 
-      return { session: getDb().upsertSession(toJsonRecord(session)) }
+      return {
+        session: getDb().upsertSession(toJsonRecord(session)),
+        resources: uploadedResources.uploaded,
+      }
     } catch (error) {
+      if (!sessionCreated && uploadedFileIds.length > 0) {
+        const { getAnthropicClient } = await import("@/server/anthropic")
+        const { deleteUploadedFiles } =
+          await import("@/server/session-resources")
+        await deleteUploadedFiles(getAnthropicClient(), uploadedFileIds)
+      }
       throw await clientSafeError(error)
     }
   })

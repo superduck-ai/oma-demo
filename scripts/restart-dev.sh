@@ -30,7 +30,7 @@ sleep 1
 
 (
   cd "$ROOT_DIR"
-  nohup bunx vite dev --host "$HOST" --port "$PORT" > "$LOG_FILE" 2>&1 &
+  nohup "$ROOT_DIR/node_modules/.bin/vite" dev --host "$HOST" --port "$PORT" > "$LOG_FILE" 2>&1 &
   echo $! > "$PID_FILE"
 )
 
