@@ -80,14 +80,16 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
-import type {
-  ExistingFileSessionResource,
-  JsonRecord,
-  MarkdownSessionResource,
-  PendingAction,
-  SessionDetailResponse,
-  StoredSession,
-  StoredSessionEvent,
+import {
+  VAULT_ID_PATTERN,
+  type ExistingFileSessionResource,
+  type JsonRecord,
+  type ManagedVaultOption,
+  type MarkdownSessionResource,
+  type PendingAction,
+  type SessionDetailResponse,
+  type StoredSession,
+  type StoredSessionEvent,
 } from "@/lib/managed-agents"
 import {
   createManagedSession,
@@ -95,6 +97,7 @@ import {
   getSessionDetail,
   listAvailableManagedAgents,
   listAvailableManagedEnvironments,
+  listAvailableManagedVaults,
   listLocalSessions,
   sendCustomToolResult,
   sendSessionMessage,
@@ -108,10 +111,22 @@ export const Route = createFileRoute("/")({ component: App })
 type TurnState = "idle" | "running" | "ended" | "error"
 type EditableMarkdownResource = MarkdownSessionResource & { id: string }
 type EditableFileResource = ExistingFileSessionResource & { id: string }
+type VaultCatalogProps = {
+  vaults: Array<ManagedVaultOption>
+  vaultIds: Array<string>
+  query: {
+    isLoading: boolean
+    isFetching: boolean
+    isError: boolean
+    error: unknown
+  }
+  onVaultIdsChange: React.Dispatch<React.SetStateAction<Array<string>>>
+}
 
 const STORAGE_KEYS = {
   agentId: "oma-demo.agent-id",
   environmentId: "oma-demo.environment-id",
+  vaultIds: "oma-demo.vault-ids",
   activeSessionId: "oma-demo.active-session-id",
 }
 
@@ -120,6 +135,7 @@ function App() {
   const getConfigFn = useServerFn(getAppConfig)
   const listAgentsFn = useServerFn(listAvailableManagedAgents)
   const listEnvironmentsFn = useServerFn(listAvailableManagedEnvironments)
+  const listVaultsFn = useServerFn(listAvailableManagedVaults)
   const listSessionsFn = useServerFn(listLocalSessions)
   const getDetailFn = useServerFn(getSessionDetail)
   const createSessionFn = useServerFn(createManagedSession)
@@ -129,6 +145,7 @@ function App() {
   const customToolResultFn = useServerFn(sendCustomToolResult)
   const [agentId, setAgentId] = React.useState("")
   const [environmentId, setEnvironmentId] = React.useState("")
+  const [vaultIds, setVaultIds] = React.useState<Array<string>>([])
   const [selectionHydrated, setSelectionHydrated] = React.useState(false)
   const [activeSessionId, setActiveSessionId] = React.useState<string | null>(
     null
@@ -171,6 +188,7 @@ function App() {
   React.useEffect(() => {
     setAgentId(localStorage.getItem(STORAGE_KEYS.agentId) || "")
     setEnvironmentId(localStorage.getItem(STORAGE_KEYS.environmentId) || "")
+    setVaultIds(readStoredVaultIds())
     setActiveSessionId(localStorage.getItem(STORAGE_KEYS.activeSessionId))
     setSelectionHydrated(true)
   }, [])
@@ -186,6 +204,12 @@ function App() {
       localStorage.setItem(STORAGE_KEYS.environmentId, environmentId)
     }
   }, [environmentId, selectionHydrated])
+
+  React.useEffect(() => {
+    if (selectionHydrated) {
+      localStorage.setItem(STORAGE_KEYS.vaultIds, JSON.stringify(vaultIds))
+    }
+  }, [vaultIds, selectionHydrated])
 
   React.useEffect(() => {
     if (activeSessionId) {
@@ -216,8 +240,15 @@ function App() {
     enabled: configReady,
   })
 
+  const vaultsQuery = useQuery({
+    queryKey: ["managed-vaults"],
+    queryFn: () => listVaultsFn(),
+    enabled: configReady,
+  })
+
   const agents = agentsQuery.data?.agents ?? []
   const environments = environmentsQuery.data?.environments ?? []
+  const vaults = vaultsQuery.data?.vaults ?? []
 
   React.useEffect(() => {
     if (!selectionHydrated || !agentsQuery.data) {
@@ -244,6 +275,15 @@ function App() {
         : (environmentsQuery.data.environments[0]?.id ?? "")
     )
   }, [environmentsQuery.data, selectionHydrated])
+
+  React.useEffect(() => {
+    if (!selectionHydrated || !vaultsQuery.data) {
+      return
+    }
+
+    const availableIds = new Set(vaultsQuery.data.vaults.map((vault) => vault.id))
+    setVaultIds((current) => current.filter((vaultId) => availableIds.has(vaultId)))
+  }, [vaultsQuery.data, selectionHydrated])
 
   const sessionsQuery = useQuery({
     queryKey: ["sessions", agentId],
@@ -275,6 +315,7 @@ function App() {
           agentId,
           environmentId,
           title: title.trim() || undefined,
+          vaultIds: vaultIds.length > 0 ? vaultIds : undefined,
           markdownResources: markdownResources.map(
             ({ filename, mountPath, content }) => ({
               filename,
@@ -609,6 +650,13 @@ function App() {
                   error={environmentsQuery.error}
                 />
               </div>
+
+              <VaultCatalogField
+                vaults={vaults}
+                vaultIds={vaultIds}
+                query={vaultsQuery}
+                onVaultIdsChange={setVaultIds}
+              />
 
               <div className="space-y-1.5">
                 <Label htmlFor="session-title">Title</Label>
@@ -1279,6 +1327,95 @@ function CatalogCount({
   )
 }
 
+function VaultCatalogField({
+  vaults,
+  vaultIds,
+  query,
+  onVaultIdsChange,
+}: VaultCatalogProps) {
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between gap-2">
+        <Label>Vaults</Label>
+        <CatalogCount count={vaults.length} fetching={query.isFetching} />
+      </div>
+      <VaultCatalogBody
+        vaults={vaults}
+        vaultIds={vaultIds}
+        query={query}
+        onVaultIdsChange={onVaultIdsChange}
+      />
+      <p className="text-[10px] text-muted-foreground">
+        {vaultIds.length > 0
+          ? `${vaultIds.length} selected · attached via vault_ids`
+          : "Optional · MCP credentials for this session"}
+      </p>
+    </div>
+  )
+}
+
+function VaultCatalogBody({
+  vaults,
+  vaultIds,
+  query,
+  onVaultIdsChange,
+}: VaultCatalogProps) {
+  if (query.isError) {
+    return <CatalogSelectionMeta id="" error={query.error} />
+  }
+
+  if (vaults.length === 0) {
+    return (
+      <p className="rounded-md border border-dashed px-2 py-2 text-[11px] text-muted-foreground">
+        {catalogPlaceholder(query, "No vaults available")}
+      </p>
+    )
+  }
+
+  return (
+    <div className="max-h-28 space-y-1 overflow-y-auto rounded-md border p-1">
+      {vaults.map((vault) => {
+        const selected = vaultIds.includes(vault.id)
+
+        return (
+          <button
+            key={vault.id}
+            type="button"
+            className={cn(
+              "flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left transition-colors",
+              selected
+                ? "bg-accent text-accent-foreground"
+                : "hover:bg-muted/60"
+            )}
+            onClick={() =>
+              onVaultIdsChange((current) => toggleId(current, vault.id))
+            }
+          >
+            <span
+              className={cn(
+                "mt-0.5 flex size-3.5 shrink-0 items-center justify-center rounded-sm border",
+                selected
+                  ? "border-foreground bg-foreground text-background"
+                  : "border-muted-foreground/40"
+              )}
+            >
+              {selected ? <CheckIcon className="size-2.5" /> : null}
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-xs font-medium">
+                {vault.name || vault.id}
+              </span>
+              <span className="mt-0.5 block truncate font-mono text-[10px] text-muted-foreground">
+                {vault.id}
+              </span>
+            </span>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 function CatalogSelectionMeta({ id, error }: { id: string; error: unknown }) {
   if (error) {
     return (
@@ -1304,6 +1441,31 @@ function catalogPlaceholder(
     return "Failed to load"
   }
   return emptyLabel
+}
+
+function readStoredVaultIds(): Array<string> {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.vaultIds)
+    if (!raw) {
+      return []
+    }
+
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) {
+      return []
+    }
+
+    return parsed.filter(
+      (value): value is string =>
+        typeof value === "string" && VAULT_ID_PATTERN.test(value)
+    )
+  } catch {
+    return []
+  }
+}
+
+function toggleId(ids: Array<string>, id: string): Array<string> {
+  return ids.includes(id) ? ids.filter((item) => item !== id) : [...ids, id]
 }
 
 function ConfigBadge({

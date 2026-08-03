@@ -3,18 +3,18 @@ import type Anthropic from "@anthropic-ai/sdk"
 import type {
   ManagedAgentOption,
   ManagedEnvironmentOption,
+  ManagedVaultOption,
 } from "@/lib/managed-agents"
 
 export async function fetchManagedAgentOptions(
   client: Anthropic
 ): Promise<Array<ManagedAgentOption>> {
-  const agents: Array<ManagedAgentOption> = []
-
-  for await (const agent of client.beta.agents.list({
-    include_archived: false,
-    limit: 100,
-  })) {
-    agents.push({
+  return collectSortedCatalog(
+    client.beta.agents.list({
+      include_archived: false,
+      limit: 100,
+    }),
+    (agent) => ({
       id: agent.id,
       name: agent.name,
       description: agent.description,
@@ -22,21 +22,18 @@ export async function fetchManagedAgentOptions(
       version: agent.version,
       updatedAt: agent.updated_at,
     })
-  }
-
-  return agents.sort(compareResourcesByUpdatedAt)
+  )
 }
 
 export async function fetchManagedEnvironmentOptions(
   client: Anthropic
 ): Promise<Array<ManagedEnvironmentOption>> {
-  const environments: Array<ManagedEnvironmentOption> = []
-
-  for await (const environment of client.beta.environments.list({
-    include_archived: false,
-    limit: 100,
-  })) {
-    environments.push({
+  return collectSortedCatalog(
+    client.beta.environments.list({
+      include_archived: false,
+      limit: 100,
+    }),
+    (environment) => ({
       id: environment.id,
       name: environment.name,
       description: environment.description,
@@ -44,9 +41,39 @@ export async function fetchManagedEnvironmentOptions(
       scope: environment.scope ?? null,
       updatedAt: environment.updated_at,
     })
+  )
+}
+
+export async function fetchManagedVaultOptions(
+  client: Anthropic
+): Promise<Array<ManagedVaultOption>> {
+  return collectSortedCatalog(
+    client.beta.vaults.list({
+      include_archived: false,
+      limit: 100,
+    }),
+    (vault) => ({
+      id: vault.id,
+      name: vault.display_name,
+      updatedAt: vault.updated_at,
+    })
+  )
+}
+
+async function collectSortedCatalog<
+  TSource,
+  TOption extends { id: string; name: string; updatedAt: string },
+>(
+  pages: AsyncIterable<TSource>,
+  project: (item: TSource) => TOption
+): Promise<Array<TOption>> {
+  const items: Array<TOption> = []
+
+  for await (const item of pages) {
+    items.push(project(item))
   }
 
-  return environments.sort(compareResourcesByUpdatedAt)
+  return items.sort(compareResourcesByUpdatedAt)
 }
 
 function compareResourcesByUpdatedAt(
