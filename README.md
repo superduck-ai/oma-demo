@@ -23,9 +23,7 @@ bun run test
 bun run build
 ```
 
-`bun run dev` starts Vite under the **Bun** runtime (`bun --bun`) so local persistence can use `bun:sqlite`. Plain Node.js needs **22.5+** for the `node:sqlite` fallback.
-
-The local SQLite database is created automatically at `.data/oma-demo.sqlite` on first use (you do not need to create this file manually).
+The local SQLite database is created at `.data/oma-demo.sqlite`.
 
 ## Default Debug IDs
 
