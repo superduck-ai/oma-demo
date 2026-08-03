@@ -674,22 +674,25 @@ function sessionStatus(value: unknown): SessionStatus {
 function createSqliteDatabase(path: string): SqliteDatabase {
   if (process.versions.bun) {
     const { Database } = require("bun:sqlite") as {
-      Database: new (path: string) => {
-        exec: (sql: string) => unknown
-        query: <TRow, TParams = unknown>(
-          sql: string
-        ) => {
-          run: (params?: TParams) => unknown
-          get: (params?: TParams) => TRow | null
-          all: (params?: TParams) => Array<TRow>
-        }
-        close: () => unknown
-      }
+      Database: new (path: string) => SqliteDatabase
     }
 
     return new Database(path)
   }
 
+  try {
+    return createNodeSqliteDatabase(path)
+  } catch (error) {
+    const detail = error instanceof Error ? error.message : String(error)
+    throw new Error(
+      `SQLite unavailable under Node.js ${process.version}. ` +
+        `Use \`bun --bun run dev\` (Bun runtime + bun:sqlite) or Node.js 22.5+ (node:sqlite). ` +
+        `(${detail})`
+    )
+  }
+}
+
+function createNodeSqliteDatabase(path: string): SqliteDatabase {
   const { DatabaseSync } = require("node:sqlite") as {
     DatabaseSync: new (path: string) => {
       exec: (sql: string) => unknown
@@ -711,8 +714,9 @@ function createSqliteDatabase(path: string): SqliteDatabase {
         run: (params?: TParams) =>
           params === undefined ? statement.run() : statement.run(params),
         get: (params?: TParams) =>
-          ((params === undefined ? statement.get() : statement.get(params)) as
-            TRow | undefined) ?? null,
+          ((params === undefined
+            ? statement.get()
+            : statement.get(params)) as TRow | undefined) ?? null,
         all: (params?: TParams) =>
           (params === undefined
             ? statement.all()

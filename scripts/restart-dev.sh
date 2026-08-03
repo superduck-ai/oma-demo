@@ -30,7 +30,8 @@ sleep 1
 
 (
   cd "$ROOT_DIR"
-  nohup "$ROOT_DIR/node_modules/.bin/vite" dev --host "$HOST" --port "$PORT" > "$LOG_FILE" 2>&1 &
+  # Force Bun runtime so server code can use bun:sqlite (Node 20 has no node:sqlite).
+  nohup bun --bun "$ROOT_DIR/node_modules/.bin/vite" dev --host "$HOST" --port "$PORT" > "$LOG_FILE" 2>&1 &
   echo $! > "$PID_FILE"
 )
 
