@@ -23,6 +23,7 @@ export function isMountPathValid(value: string, allowEmpty = true) {
     (allowEmpty && path.length === 0) ||
     (path.startsWith("/") &&
       path.length <= 1024 &&
+      !containsControlCharacters(path) &&
       !path.split("/").some((segment) => segment === ".."))
   )
 }

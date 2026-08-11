@@ -19,5 +19,6 @@ describe("会话文件校验", () => {
     expect(isMountPathValid("", false)).toBe(false)
     expect(isMountPathValid("/context.md", false)).toBe(true)
     expect(isMountPathValid("/parent/../context.md", false)).toBe(false)
+    expect(isMountPathValid("/context\u0000.md", false)).toBe(false)
   })
 })
