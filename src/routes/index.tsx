@@ -114,6 +114,11 @@ import {
 } from "@/lib/managed-agents-functions"
 import { cn } from "@/lib/utils"
 import { useTheme } from "@/lib/use-theme"
+import {
+  isMarkdownFilenameValid,
+  isMountPathValid,
+  normalizeMarkdownFilename,
+} from "@/lib/session-file-validation"
 
 export const Route = createFileRoute("/")({ component: App })
 
@@ -149,7 +154,9 @@ function App() {
     null
   )
   const activeSessionIdRef = React.useRef(activeSessionId)
-  activeSessionIdRef.current = activeSessionId
+  React.useEffect(() => {
+    activeSessionIdRef.current = activeSessionId
+  }, [activeSessionId])
   const [title, setTitle] = React.useState("")
   const [markdownResources, setMarkdownResources] = React.useState<
     Array<EditableMarkdownResource>
@@ -1359,26 +1366,13 @@ function newExistingFileResourceDraft(): ExistingFileSessionResource {
   }
 }
 
-function normalizeMarkdownFilename(filename: string) {
-  const trimmed = filename.trim()
-  if (!trimmed) {
-    return ""
-  }
-  return /\.md$/i.test(trimmed) ? trimmed : `${trimmed}.md`
-}
-
 function isMarkdownResourceDraftValid(resource: MarkdownSessionResource) {
   const filename = normalizeMarkdownFilename(resource.filename)
   const mountPath = resource.mountPath?.trim() ?? ""
 
   return (
-    filename.length > 3 &&
-    filename.length <= 255 &&
-    !/[<>:"|?*/\\]/.test(filename.replace(/\.md$/i, "")) &&
-    !containsControlCharacters(filename) &&
-    mountPath.startsWith("/") &&
-    mountPath.length <= 1024 &&
-    !mountPath.split("/").some((segment) => segment === "..") &&
+    isMarkdownFilenameValid(filename) &&
+    isMountPathValid(mountPath, false) &&
     resource.content.length <= 10_000_000
   )
 }
@@ -1390,10 +1384,7 @@ function isExistingFileResourceDraftValid(
 
   return (
     /^file_[A-Za-z0-9]+$/.test(resource.fileId.trim()) &&
-    (mountPath.length === 0 ||
-      (mountPath.startsWith("/") &&
-        mountPath.length <= 1024 &&
-        !mountPath.split("/").some((segment) => segment === "..")))
+    isMountPathValid(mountPath)
   )
 }
 
@@ -2063,12 +2054,5 @@ function fileToBase64(file: File) {
       resolve(result.slice(separator + 1))
     }
     reader.readAsDataURL(file)
-  })
-}
-
-function containsControlCharacters(value: string) {
-  return [...value].some((character) => {
-    const codePoint = character.codePointAt(0) ?? 0
-    return codePoint < 32 || codePoint === 127
   })
 }

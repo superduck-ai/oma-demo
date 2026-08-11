@@ -155,8 +155,12 @@ export function buildUserMessageContent(
       )
     }
 
+    const normalizedMimeType = file.mimeType
+      .split(";", 1)[0]
+      .trim()
+      .toLowerCase()
     content.push({
-      type: IMAGE_MIME_TYPES.has(file.mimeType) ? "image" : "document",
+      type: IMAGE_MIME_TYPES.has(normalizedMimeType) ? "image" : "document",
       source: {
         type: "file",
         file_id: file.fileId,

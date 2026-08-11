@@ -11,21 +11,35 @@ export function useTheme() {
   // 沿用 index.tsx 既有 "effect 里读 localStorage" 模式以规避 hydration mismatch。
   // 首屏视觉由 __root.tsx 的内联脚本在 hydrate 前提前修正，不受此初始值影响。
   const [theme, setTheme] = React.useState<Theme>("light")
+  const [initialized, setInitialized] = React.useState(false)
 
   React.useEffect(() => {
-    const stored = localStorage.getItem(THEME_STORAGE_KEY) as Theme | null
+    let stored: string | null = null
+    try {
+      stored = localStorage.getItem(THEME_STORAGE_KEY)
+    } catch {
+      // 存储不可用时仍保持主题功能可用。
+    }
     const initial: Theme = stored === "dark" ? "dark" : "light"
     setTheme(initial)
-    document.documentElement.classList.toggle("dark", initial === "dark")
+    setInitialized(true)
   }, [])
 
+  React.useEffect(() => {
+    if (!initialized) {
+      return
+    }
+
+    try {
+      localStorage.setItem(THEME_STORAGE_KEY, theme)
+    } catch {
+      // 持久化失败不应阻断 DOM 主题同步。
+    }
+    document.documentElement.classList.toggle("dark", theme === "dark")
+  }, [initialized, theme])
+
   const toggleTheme = React.useCallback(() => {
-    setTheme((prev) => {
-      const next: Theme = prev === "dark" ? "light" : "dark"
-      localStorage.setItem(THEME_STORAGE_KEY, next)
-      document.documentElement.classList.toggle("dark", next === "dark")
-      return next
-    })
+    setTheme((previous) => (previous === "dark" ? "light" : "dark"))
   }, [])
 
   return { theme, toggleTheme }

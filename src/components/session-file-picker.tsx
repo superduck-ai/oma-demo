@@ -26,6 +26,11 @@ import { Label } from "@/components/ui/label"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import { Textarea } from "@/components/ui/textarea"
 import type { MountedSessionFile } from "@/lib/managed-agents"
+import {
+  isMarkdownFilenameValid,
+  isMountPathValid,
+  normalizeMarkdownFilename,
+} from "@/lib/session-file-validation"
 import { cn } from "@/lib/utils"
 
 const MAX_UPLOAD_BYTES = 10_000_000
@@ -322,6 +327,12 @@ export function SessionFilePicker({
               <Input
                 id="session-resource-mount-path"
                 value={mountPath}
+                aria-invalid={!mountPathValid}
+                aria-describedby={
+                  mountPathValid
+                    ? undefined
+                    : "session-resource-mount-path-error"
+                }
                 placeholder={
                   addMode === "markdown"
                     ? `/${normalizedMarkdownFilename || "context.md"}`
@@ -332,7 +343,10 @@ export function SessionFilePicker({
                 onChange={(event) => setMountPath(event.target.value)}
               />
               {!mountPathValid && (
-                <p className="text-xs text-destructive">
+                <p
+                  id="session-resource-mount-path-error"
+                  className="text-xs text-destructive"
+                >
                   Mount path must be absolute and cannot contain '..'.
                 </p>
               )}
@@ -505,38 +519,4 @@ function formatBytes(value: number) {
     return `${(value / 1024).toFixed(1)} KB`
   }
   return `${(value / (1024 * 1024)).toFixed(1)} MB`
-}
-
-function normalizeMarkdownFilename(filename: string) {
-  const trimmed = filename.trim()
-  if (!trimmed) {
-    return ""
-  }
-  return /\.md$/i.test(trimmed) ? trimmed : `${trimmed}.md`
-}
-
-function isMarkdownFilenameValid(filename: string) {
-  return (
-    filename.length > 3 &&
-    filename.length <= 255 &&
-    !/[<>:"|?*/\\]/.test(filename.replace(/\.md$/i, "")) &&
-    !containsControlCharacters(filename)
-  )
-}
-
-function isMountPathValid(value: string) {
-  const path = value.trim()
-  return (
-    path.length === 0 ||
-    (path.startsWith("/") &&
-      path.length <= 1024 &&
-      !path.split("/").some((segment) => segment === ".."))
-  )
-}
-
-function containsControlCharacters(value: string) {
-  return [...value].some((character) => {
-    const codePoint = character.codePointAt(0) ?? 0
-    return codePoint < 32 || codePoint === 127
-  })
 }

@@ -307,6 +307,7 @@ describe("Session event files", () => {
     const fallback = files.find((file) => file.fileId === "file_7")
 
     expect(files).toHaveLength(20)
+    expect(maximumActiveRequests).toBeGreaterThan(1)
     expect(maximumActiveRequests).toBeLessThanOrEqual(8)
     expect(fallback).toEqual({
       resourceId: "sesrsc_7",
@@ -327,7 +328,7 @@ describe("Session event files", () => {
         "  Analyze these files.  ",
         ["file_image", "file_document", "file_image"],
         [
-          mountedFile("file_image", "image/png"),
+          mountedFile("file_image", " IMAGE/PNG; charset=binary "),
           mountedFile("file_document", "application/pdf"),
         ]
       )

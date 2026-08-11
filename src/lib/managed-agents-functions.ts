@@ -2,6 +2,11 @@ import { createServerFn } from "@tanstack/react-start"
 import { z } from "zod"
 
 import type { JsonRecord, SessionDetailResponse } from "@/lib/managed-agents"
+import {
+  containsControlCharacters,
+  isMountPathValid,
+  MARKDOWN_FILENAME_PATTERN,
+} from "@/lib/session-file-validation"
 
 const MAX_UPLOAD_BYTES = 10_000_000
 const MAX_UPLOAD_BASE64_LENGTH = Math.ceil(MAX_UPLOAD_BYTES / 3) * 4
@@ -12,9 +17,7 @@ const mountPathSchema = z
   .min(1)
   .max(1024)
   .refine(
-    (path) =>
-      path.startsWith("/") &&
-      !path.split("/").some((segment) => segment === ".."),
+    (path) => isMountPathValid(path, false),
     "Mount paths must be absolute and cannot contain '..'."
   )
 
@@ -32,7 +35,7 @@ const createSessionSchema = z
             .min(1)
             .max(255)
             .regex(
-              /^[^<>:"|?*/\\]+\.md$/i,
+              MARKDOWN_FILENAME_PATTERN,
               "Markdown filenames must end in .md and contain no forbidden characters."
             )
             .refine(
@@ -130,7 +133,7 @@ const addSessionFileResourceSchema = z
           .min(1)
           .max(255)
           .regex(
-            /^[^<>:"|?*/\\]+\.md$/i,
+            MARKDOWN_FILENAME_PATTERN,
             "Markdown filenames must end in .md and contain no forbidden characters."
           )
           .refine(
@@ -556,13 +559,6 @@ function toJsonRecord(value: unknown): JsonRecord {
   }
 
   return {}
-}
-
-function containsControlCharacters(value: string) {
-  return [...value].some((character) => {
-    const codePoint = character.codePointAt(0) ?? 0
-    return codePoint < 32 || codePoint === 127
-  })
 }
 
 function decodeBase64File(value: string) {
