@@ -1,4 +1,5 @@
-import Anthropic, { toFile } from "@anthropic-ai/sdk"
+import { toFile } from "@anthropic-ai/sdk"
+import type Anthropic from "@anthropic-ai/sdk"
 import type { BetaManagedAgentsFileResourceParams } from "@anthropic-ai/sdk/resources/beta/sessions/sessions"
 
 import type {

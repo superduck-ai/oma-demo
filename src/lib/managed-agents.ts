@@ -96,8 +96,33 @@ export interface ExistingFileSessionResource {
   mountPath?: string
 }
 
+export interface MountedSessionFile {
+  resourceId: string
+  fileId: string
+  filename: string
+  mimeType: string
+  sizeBytes: number
+  mountPath: string
+}
+
+export interface AddSessionFileResourceRequest {
+  sessionId: string
+  mountPath?: string
+  fileId?: string
+  upload?: {
+    filename: string
+    mimeType: string
+    dataBase64: string
+  }
+  markdown?: {
+    filename: string
+    content: string
+  }
+}
+
 export interface SendMessageRequest {
-  content: string
+  content?: string
+  fileIds?: Array<string>
 }
 
 export interface ToolConfirmationRequest {
