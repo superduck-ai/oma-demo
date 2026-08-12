@@ -1,6 +1,7 @@
 import { createServerFn } from "@tanstack/react-start"
 import { z } from "zod"
 
+import { VAULT_ID_PATTERN } from "@/lib/managed-agents"
 import type { JsonRecord, SessionDetailResponse } from "@/lib/managed-agents"
 import {
   containsControlCharacters,
@@ -21,11 +22,17 @@ const mountPathSchema = z
     "Mount paths must be absolute and cannot contain '..'."
   )
 
+const vaultIdSchema = z
+  .string()
+  .trim()
+  .regex(VAULT_ID_PATTERN, "Vault IDs must use the 'vlt_...' format.")
+
 const createSessionSchema = z
   .object({
     agentId: z.string().min(1),
     environmentId: z.string().min(1),
     title: z.string().optional(),
+    vaultIds: z.array(vaultIdSchema).optional(),
     markdownResources: z
       .array(
         z.object({
@@ -181,32 +188,30 @@ export const getAppConfig = createServerFn({ method: "GET" }).handler(
 export const listAvailableManagedAgents = createServerFn({
   method: "GET",
 }).handler(async () => {
-  try {
-    const { getAnthropicClient } = await import("@/server/anthropic")
-    const { fetchManagedAgentOptions } =
-      await import("@/server/managed-resources")
-
-    return {
-      agents: await fetchManagedAgentOptions(getAnthropicClient()),
-    }
-  } catch (error) {
-    throw await clientSafeError(error)
+  const { fetchManagedAgentOptions } =
+    await import("@/server/managed-resources")
+  return {
+    agents: await withAnthropicClient(fetchManagedAgentOptions),
   }
 })
 
 export const listAvailableManagedEnvironments = createServerFn({
   method: "GET",
 }).handler(async () => {
-  try {
-    const { getAnthropicClient } = await import("@/server/anthropic")
-    const { fetchManagedEnvironmentOptions } =
-      await import("@/server/managed-resources")
+  const { fetchManagedEnvironmentOptions } =
+    await import("@/server/managed-resources")
+  return {
+    environments: await withAnthropicClient(fetchManagedEnvironmentOptions),
+  }
+})
 
-    return {
-      environments: await fetchManagedEnvironmentOptions(getAnthropicClient()),
-    }
-  } catch (error) {
-    throw await clientSafeError(error)
+export const listAvailableManagedVaults = createServerFn({
+  method: "GET",
+}).handler(async () => {
+  const { fetchManagedVaultOptions } =
+    await import("@/server/managed-resources")
+  return {
+    vaults: await withAnthropicClient(fetchManagedVaultOptions),
   }
 })
 
@@ -308,6 +313,7 @@ export const createManagedSession = createServerFn({ method: "POST" })
         ...uploadedResources.sessionResources,
         ...mapExistingFileResources(data.fileResources ?? []),
       ]
+      const vaultIds = [...new Set(data.vaultIds ?? [])]
       uploadedFileIds = uploadedResources.uploaded.map(
         (resource) => resource.fileId
       )
@@ -319,6 +325,7 @@ export const createManagedSession = createServerFn({ method: "POST" })
           app: "oma-demo",
         },
         ...(sessionResources.length > 0 ? { resources: sessionResources } : {}),
+        ...(vaultIds.length > 0 ? { vault_ids: vaultIds } : {}),
         betas: MANAGED_AGENTS_BETAS,
       })
       sessionCreated = true
@@ -535,6 +542,16 @@ async function runStreamedTurn(
 async function getClientForTurn() {
   const { getAnthropicClient } = await import("@/server/anthropic")
   return getAnthropicClient()
+}
+
+async function withAnthropicClient<T>(
+  run: (client: Awaited<ReturnType<typeof getClientForTurn>>) => Promise<T>
+): Promise<T> {
+  try {
+    return await run(await getClientForTurn())
+  } catch (error) {
+    throw await clientSafeError(error)
+  }
 }
 
 async function managedAgentBetas() {

@@ -34,6 +34,14 @@ export interface ManagedEnvironmentOption {
   updatedAt: string
 }
 
+export interface ManagedVaultOption {
+  id: string
+  name: string
+  updatedAt: string
+}
+
+export const VAULT_ID_PATTERN = /^vlt_[A-Za-z0-9]+$/
+
 export interface StoredSession {
   id: string
   agentId: string
@@ -81,6 +89,7 @@ export interface CreateSessionRequest {
   agentId: string
   environmentId: string
   title?: string
+  vaultIds?: Array<string>
   markdownResources?: Array<MarkdownSessionResource>
   fileResources?: Array<ExistingFileSessionResource>
 }

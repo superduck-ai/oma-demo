@@ -88,9 +88,11 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
+import { VAULT_ID_PATTERN } from "@/lib/managed-agents"
 import type {
   ExistingFileSessionResource,
   JsonRecord,
+  ManagedVaultOption,
   MarkdownSessionResource,
   MountedSessionFile,
   PendingAction,
@@ -105,6 +107,7 @@ import {
   getSessionDetail,
   listAvailableManagedAgents,
   listAvailableManagedEnvironments,
+  listAvailableManagedVaults,
   listLocalSessions,
   listMountedSessionFiles,
   sendCustomToolResult,
@@ -112,6 +115,11 @@ import {
   sendToolConfirmation,
   syncManagedSession,
 } from "@/lib/managed-agents-functions"
+import { presentSessionEvent } from "@/lib/session-event-presentation"
+import type {
+  SessionEventCategory,
+  SessionEventPresentation,
+} from "@/lib/session-event-presentation"
 import { cn } from "@/lib/utils"
 import { useTheme } from "@/lib/use-theme"
 import {
@@ -125,10 +133,22 @@ export const Route = createFileRoute("/")({ component: App })
 type TurnState = "idle" | "running" | "ended" | "error"
 type EditableMarkdownResource = MarkdownSessionResource & { id: string }
 type EditableFileResource = ExistingFileSessionResource & { id: string }
+type VaultCatalogProps = {
+  vaults: Array<ManagedVaultOption>
+  vaultIds: Array<string>
+  query: {
+    isLoading: boolean
+    isFetching: boolean
+    isError: boolean
+    error: unknown
+  }
+  onVaultIdsChange: React.Dispatch<React.SetStateAction<Array<string>>>
+}
 
 const STORAGE_KEYS = {
   agentId: "oma-demo.agent-id",
   environmentId: "oma-demo.environment-id",
+  vaultIds: "oma-demo.vault-ids",
   activeSessionId: "oma-demo.active-session-id",
 }
 
@@ -138,6 +158,7 @@ function App() {
   const getConfigFn = useServerFn(getAppConfig)
   const listAgentsFn = useServerFn(listAvailableManagedAgents)
   const listEnvironmentsFn = useServerFn(listAvailableManagedEnvironments)
+  const listVaultsFn = useServerFn(listAvailableManagedVaults)
   const listSessionsFn = useServerFn(listLocalSessions)
   const getDetailFn = useServerFn(getSessionDetail)
   const listMountedFilesFn = useServerFn(listMountedSessionFiles)
@@ -149,6 +170,7 @@ function App() {
   const customToolResultFn = useServerFn(sendCustomToolResult)
   const [agentId, setAgentId] = React.useState("")
   const [environmentId, setEnvironmentId] = React.useState("")
+  const [vaultIds, setVaultIds] = React.useState<Array<string>>([])
   const [selectionHydrated, setSelectionHydrated] = React.useState(false)
   const [activeSessionId, setActiveSessionId] = React.useState<string | null>(
     null
@@ -194,10 +216,17 @@ function App() {
   const [busyLabel, setBusyLabel] = React.useState<string | null>(null)
   const [clientError, setClientError] = React.useState<string | null>(null)
   const [turnState, setTurnState] = React.useState<TurnState>("idle")
+  const [pendingMessage, setPendingMessage] = React.useState<{
+    sessionId: string
+    content: string
+    fileIds: Array<string>
+    sentAt: string
+  } | null>(null)
 
   React.useEffect(() => {
     setAgentId(localStorage.getItem(STORAGE_KEYS.agentId) || "")
     setEnvironmentId(localStorage.getItem(STORAGE_KEYS.environmentId) || "")
+    setVaultIds(readStoredVaultIds())
     setActiveSessionId(localStorage.getItem(STORAGE_KEYS.activeSessionId))
     setSelectionHydrated(true)
   }, [])
@@ -213,6 +242,12 @@ function App() {
       localStorage.setItem(STORAGE_KEYS.environmentId, environmentId)
     }
   }, [environmentId, selectionHydrated])
+
+  React.useEffect(() => {
+    if (selectionHydrated) {
+      localStorage.setItem(STORAGE_KEYS.vaultIds, JSON.stringify(vaultIds))
+    }
+  }, [vaultIds, selectionHydrated])
 
   React.useEffect(() => {
     if (activeSessionId) {
@@ -243,8 +278,15 @@ function App() {
     enabled: configReady,
   })
 
+  const vaultsQuery = useQuery({
+    queryKey: ["managed-vaults"],
+    queryFn: () => listVaultsFn(),
+    enabled: configReady,
+  })
+
   const agents = agentsQuery.data?.agents ?? []
   const environments = environmentsQuery.data?.environments ?? []
+  const vaults = vaultsQuery.data?.vaults ?? []
 
   React.useEffect(() => {
     if (!selectionHydrated || !agentsQuery.data) {
@@ -271,6 +313,19 @@ function App() {
         : (environmentsQuery.data.environments[0]?.id ?? "")
     )
   }, [environmentsQuery.data, selectionHydrated])
+
+  React.useEffect(() => {
+    if (!selectionHydrated || !vaultsQuery.data) {
+      return
+    }
+
+    const availableIds = new Set(
+      vaultsQuery.data.vaults.map((vault) => vault.id)
+    )
+    setVaultIds((current) =>
+      current.filter((vaultId) => availableIds.has(vaultId))
+    )
+  }, [vaultsQuery.data, selectionHydrated])
 
   const sessionsQuery = useQuery({
     queryKey: ["sessions", agentId],
@@ -314,6 +369,7 @@ function App() {
           agentId,
           environmentId,
           title: title.trim() || undefined,
+          vaultIds: vaultIds.length > 0 ? vaultIds : undefined,
           markdownResources: markdownResources.map(
             ({ filename, mountPath, content }) => ({
               filename,
@@ -443,22 +499,34 @@ function App() {
       return
     }
 
-    const content = message.trim() || undefined
+    const sessionId = activeSessionId
+    const content = message.trim()
     const fileIds = [...selectedMessageFileIds]
+    setMessage("")
+    setSelectedMessageFileIds([])
+    setPendingMessage({
+      sessionId,
+      content,
+      fileIds,
+      sentAt: new Date().toISOString(),
+    })
 
-    const sent = await runTurn(activeSessionId, "Sending message", () =>
+    const sent = await runTurn(sessionId, "Sending message", () =>
       sendMessageFn({
         data: {
-          sessionId: activeSessionId,
-          content,
+          sessionId,
+          content: content || undefined,
           fileIds,
         },
       })
     )
 
-    if (sent) {
-      setMessage("")
-      setSelectedMessageFileIds([])
+    setPendingMessage(null)
+    if (!sent && activeSessionIdRef.current === sessionId) {
+      setMessage((current) => current || content)
+      setSelectedMessageFileIds((current) =>
+        current.length > 0 ? current : fileIds
+      )
     }
   }
 
@@ -737,6 +805,13 @@ function App() {
                   error={environmentsQuery.error}
                 />
               </div>
+
+              <VaultCatalogField
+                vaults={vaults}
+                vaultIds={vaultIds}
+                query={vaultsQuery}
+                onVaultIdsChange={setVaultIds}
+              />
 
               <div className="space-y-1.5">
                 <Label htmlFor="session-title">Title</Label>
@@ -1132,6 +1207,25 @@ function App() {
                           </MessageScrollerItem>
                         )
                       })}
+
+                      {pendingMessage?.sessionId === activeSessionId && (
+                        <MessageScrollerItem
+                          messageId="pending-user-message"
+                          scrollAnchor
+                        >
+                          <MessageBubble
+                            role="user"
+                            title="You"
+                            text={pendingMessage.content}
+                            attachments={mountedFileAttachments(
+                              pendingMessage.fileIds,
+                              mountedFiles
+                            )}
+                            time={formatTime(pendingMessage.sentAt)}
+                            streaming
+                          />
+                        </MessageScrollerItem>
+                      )}
                     </MessageScrollerContent>
                   </MessageScrollerViewport>
                   <MessageScrollerButton />
@@ -1403,6 +1497,95 @@ function CatalogCount({
   )
 }
 
+function VaultCatalogField({
+  vaults,
+  vaultIds,
+  query,
+  onVaultIdsChange,
+}: VaultCatalogProps) {
+  return (
+    <div className="space-y-1.5">
+      <div className="flex items-center justify-between gap-2">
+        <Label>Vaults</Label>
+        <CatalogCount count={vaults.length} fetching={query.isFetching} />
+      </div>
+      <VaultCatalogBody
+        vaults={vaults}
+        vaultIds={vaultIds}
+        query={query}
+        onVaultIdsChange={onVaultIdsChange}
+      />
+      <p className="text-[10px] text-muted-foreground">
+        {vaultIds.length > 0
+          ? `${vaultIds.length} selected · attached via vault_ids`
+          : "Optional · MCP credentials for this session"}
+      </p>
+    </div>
+  )
+}
+
+function VaultCatalogBody({
+  vaults,
+  vaultIds,
+  query,
+  onVaultIdsChange,
+}: VaultCatalogProps) {
+  if (query.isError) {
+    return <CatalogSelectionMeta id="" error={query.error} />
+  }
+
+  if (vaults.length === 0) {
+    return (
+      <p className="rounded-md border border-dashed px-2 py-2 text-[11px] text-muted-foreground">
+        {catalogPlaceholder(query, "No vaults available")}
+      </p>
+    )
+  }
+
+  return (
+    <div className="max-h-28 space-y-1 overflow-y-auto rounded-md border p-1">
+      {vaults.map((vault) => {
+        const selected = vaultIds.includes(vault.id)
+
+        return (
+          <button
+            key={vault.id}
+            type="button"
+            className={cn(
+              "flex w-full items-start gap-2 rounded-md px-2 py-1.5 text-left transition-colors",
+              selected
+                ? "bg-accent text-accent-foreground"
+                : "hover:bg-muted/60"
+            )}
+            onClick={() =>
+              onVaultIdsChange((current) => toggleId(current, vault.id))
+            }
+          >
+            <span
+              className={cn(
+                "mt-0.5 flex size-3.5 shrink-0 items-center justify-center rounded-sm border",
+                selected
+                  ? "border-foreground bg-foreground text-background"
+                  : "border-muted-foreground/40"
+              )}
+            >
+              {selected ? <CheckIcon className="size-2.5" /> : null}
+            </span>
+            <span className="min-w-0 flex-1">
+              <span className="block truncate text-xs font-medium">
+                {vault.name || vault.id}
+              </span>
+              <span className="mt-0.5 block truncate font-mono text-[10px] text-muted-foreground">
+                {vault.id}
+              </span>
+            </span>
+          </button>
+        )
+      })}
+    </div>
+  )
+}
+
 function CatalogSelectionMeta({ id, error }: { id: string; error: unknown }) {
   if (error) {
     return (
@@ -1428,6 +1611,31 @@ function catalogPlaceholder(
     return "Failed to load"
   }
   return emptyLabel
+}
+
+function readStoredVaultIds(): Array<string> {
+  try {
+    const raw = localStorage.getItem(STORAGE_KEYS.vaultIds)
+    if (!raw) {
+      return []
+    }
+
+    const parsed: unknown = JSON.parse(raw)
+    if (!Array.isArray(parsed)) {
+      return []
+    }
+
+    return parsed.filter(
+      (value): value is string =>
+        typeof value === "string" && VAULT_ID_PATTERN.test(value)
+    )
+  } catch {
+    return []
+  }
+}
+
+function toggleId(ids: Array<string>, id: string): Array<string> {
+  return ids.includes(id) ? ids.filter((item) => item !== id) : [...ids, id]
 }
 
 function ConfigBadge({
@@ -1667,12 +1875,13 @@ function EventRow({
 }) {
   const type = event.type
   const payload = event.payload
+  const presentation = presentSessionEvent(type, payload)
 
-  if (type === "user.message") {
+  if (type === "user.message" || type === "agent.message") {
     return (
       <MessageBubble
-        role="user"
-        title="You"
+        role={type === "user.message" ? "user" : "agent"}
+        title={presentation.title}
         text={contentText(payload.content)}
         attachments={contentAttachments(payload.content, mountedFiles)}
         time={formatTime(event.processedAt ?? event.createdAt)}
@@ -1680,61 +1889,7 @@ function EventRow({
     )
   }
 
-  if (type === "agent.message") {
-    return (
-      <MessageBubble
-        role="agent"
-        title="Agent"
-        text={contentText(payload.content)}
-        attachments={contentAttachments(payload.content, mountedFiles)}
-        time={formatTime(event.processedAt ?? event.createdAt)}
-      />
-    )
-  }
-
-  if (
-    type === "agent.tool_use" ||
-    type === "agent.mcp_tool_use" ||
-    type === "agent.custom_tool_use"
-  ) {
-    return (
-      <ToolEventCard
-        title={toolName(payload)}
-        subtitle={type}
-        input={recordValue(payload.input) ?? {}}
-      />
-    )
-  }
-
-  if (type === "session.error") {
-    const error = recordValue(payload.error)
-    return (
-      <Alert variant="destructive">
-        <AlertCircleIcon />
-        <AlertTitle>{stringValue(error?.type) ?? "session.error"}</AlertTitle>
-        <AlertDescription>
-          {stringValue(error?.message) ?? "The session reported an error."}
-        </AlertDescription>
-      </Alert>
-    )
-  }
-
-  return (
-    <div className="flex items-start gap-3 rounded-md border bg-background p-3 text-sm">
-      <TerminalIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="font-medium">{type}</span>
-          <span className="text-xs text-muted-foreground">
-            {formatTime(event.processedAt ?? event.createdAt)}
-          </span>
-        </div>
-        <div className="mt-1 truncate text-xs text-muted-foreground">
-          {shortId(event.eventId)}
-        </div>
-      </div>
-    </div>
-  )
+  return <EventDetailsCard event={event} presentation={presentation} />
 }
 
 function MessageBubble({
@@ -1758,7 +1913,7 @@ function MessageBubble({
     >
       <div
         className={cn(
-          "max-w-[min(100%,52rem)] rounded-md border px-3 py-2 text-sm shadow-sm",
+          "max-w-[min(100%,52rem)] min-w-0 rounded-md border px-3 py-2 text-sm shadow-sm",
           role === "user"
             ? "border-primary/20 bg-primary text-primary-foreground"
             : "bg-background"
@@ -1770,7 +1925,9 @@ function MessageBubble({
           {streaming && <Loader2Icon className="size-3 animate-spin" />}
         </div>
         {text && (
-          <div className="leading-relaxed whitespace-pre-wrap">{text}</div>
+          <div className="leading-relaxed [overflow-wrap:anywhere] whitespace-pre-wrap">
+            {text}
+          </div>
         )}
         {attachments.length > 0 && (
           <div className={cn("flex flex-wrap gap-1.5", text && "mt-2")}>
@@ -1802,31 +1959,115 @@ function MessageBubble({
   )
 }
 
-function ToolEventCard({
-  title,
-  subtitle,
-  input,
+function EventDetailsCard({
+  event,
+  presentation,
 }: {
-  title: string
-  subtitle: string
-  input: JsonRecord
+  event: StoredSessionEvent
+  presentation: SessionEventPresentation
 }) {
+  const badgeVariant =
+    presentation.tone === "danger" ? "destructive" : "outline"
+
   return (
-    <Card>
+    <Card
+      className={cn(
+        presentation.tone === "danger" && "border-destructive/40",
+        presentation.tone === "warning" &&
+          "border-amber-300/70 dark:border-amber-800"
+      )}
+    >
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-sm">
-          <TerminalIcon className="size-4 text-muted-foreground" />
-          {title}
+          <EventCategoryIcon
+            category={presentation.category}
+            tone={presentation.tone}
+          />
+          {presentation.title}
         </CardTitle>
-        <CardDescription>{subtitle}</CardDescription>
+        <CardDescription className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span>{event.type}</span>
+          <span className="font-mono">{shortId(event.eventId)}</span>
+          <span>{formatTime(event.processedAt ?? event.createdAt)}</span>
+        </CardDescription>
+        <CardAction>
+          <Badge variant={badgeVariant}>{presentation.badge}</Badge>
+        </CardAction>
       </CardHeader>
-      <CardContent>
-        <pre className="max-h-56 overflow-auto rounded-md bg-muted p-2 text-xs">
-          {JSON.stringify(input, null, 2)}
-        </pre>
+      <CardContent className="space-y-3">
+        <p className="text-sm text-muted-foreground">
+          {presentation.description}
+        </p>
+
+        {presentation.fields.length > 0 && (
+          <dl className="grid gap-2 text-xs sm:grid-cols-2">
+            {presentation.fields.map((field) => (
+              <div key={`${field.label}-${field.value}`} className="min-w-0">
+                <dt className="text-muted-foreground">{field.label}</dt>
+                <dd className="font-mono [overflow-wrap:anywhere]">
+                  {field.value}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        )}
+
+        {presentation.body && (
+          <pre className="max-h-64 overflow-auto rounded-md bg-muted p-2 text-xs leading-relaxed [overflow-wrap:anywhere] whitespace-pre-wrap">
+            {presentation.body}
+          </pre>
+        )}
+
+        {presentation.data !== undefined && (
+          <div>
+            <div className="mb-1 text-xs font-medium text-muted-foreground">
+              {presentation.dataLabel ?? "Data"}
+            </div>
+            <pre className="max-h-56 overflow-auto rounded-md bg-muted p-2 text-xs leading-relaxed [overflow-wrap:anywhere] whitespace-pre-wrap">
+              {JSON.stringify(presentation.data, null, 2)}
+            </pre>
+          </div>
+        )}
+
+        <details className="group rounded-md border bg-muted/30">
+          <summary className="flex min-h-10 cursor-pointer list-none items-center gap-2 px-3 text-xs font-medium select-none">
+            <ChevronRightIcon className="size-3 group-open:rotate-90" />
+            Raw event
+          </summary>
+          <pre className="max-h-80 overflow-auto border-t p-3 text-xs leading-relaxed [overflow-wrap:anywhere] whitespace-pre-wrap">
+            {JSON.stringify(event.payload, null, 2)}
+          </pre>
+        </details>
       </CardContent>
     </Card>
   )
+}
+
+function EventCategoryIcon({
+  category,
+  tone,
+}: {
+  category: SessionEventCategory
+  tone: SessionEventPresentation["tone"]
+}) {
+  const className = cn(
+    "size-4",
+    tone === "danger"
+      ? "text-destructive"
+      : tone === "warning"
+        ? "text-amber-600"
+        : tone === "success"
+          ? "text-emerald-600"
+          : "text-muted-foreground"
+  )
+
+  if (category === "thread") return <BotIcon className={className} />
+  if (category === "tool") return <TerminalIcon className={className} />
+  if (category === "model") return <CodeIcon className={className} />
+  if (category === "outcome") return <ShieldCheckIcon className={className} />
+  if (category === "session") return <DatabaseIcon className={className} />
+  if (category === "system") return <MessageSquareIcon className={className} />
+  return <ActivityIcon className={className} />
 }
 
 function PendingActionCard({
@@ -1916,8 +2157,12 @@ function PendingActionCard({
 }
 
 function contentText(content: unknown) {
+  if (typeof content === "string") {
+    return content
+  }
+
   if (!Array.isArray(content)) {
-    return ""
+    return content == null ? "" : JSON.stringify(content, null, 2)
   }
 
   return content
@@ -1939,7 +2184,7 @@ function contentText(content: unknown) {
         return ""
       }
 
-      return JSON.stringify(record)
+      return JSON.stringify(record, null, 2)
     })
     .filter(Boolean)
     .join("\n")
@@ -1986,16 +2231,22 @@ function contentAttachments(
   return attachments
 }
 
-function toolName(payload: JsonRecord) {
-  const type = stringValue(payload.type)
-  const name = stringValue(payload.name) ?? "tool"
-  const serverName = stringValue(payload.mcp_server_name)
+function mountedFileAttachments(
+  fileIds: Array<string>,
+  mountedFiles: Array<MountedSessionFile>
+): Array<MessageAttachment> {
+  const filesById = new Map(
+    mountedFiles.map((file) => [file.fileId, file] as const)
+  )
 
-  if (type === "agent.mcp_tool_use" && serverName) {
-    return `${serverName}.${name}`
-  }
-
-  return name
+  return fileIds.map((fileId) => {
+    const file = filesById.get(fileId)
+    return {
+      type: file?.mimeType.startsWith("image/") ? "image" : "document",
+      fileId,
+      filename: file?.filename ?? fileId,
+    }
+  })
 }
 
 function recordValue(value: unknown): JsonRecord | null {
