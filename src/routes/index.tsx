@@ -201,9 +201,7 @@ function App() {
   const [fileResourceDraft, setFileResourceDraft] = React.useState(
     newExistingFileResourceDraft()
   )
-  const [message, setMessage] = React.useState(
-    "请用一句话介绍当前 session 可以做什么。"
-  )
+  const [message, setMessage] = React.useState("")
   const [selectedMessageFileIds, setSelectedMessageFileIds] = React.useState<
     Array<string>
   >([])
