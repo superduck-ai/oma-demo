@@ -4,6 +4,7 @@ import type Anthropic from "@anthropic-ai/sdk"
 import {
   fetchManagedAgentOptions,
   fetchManagedEnvironmentOptions,
+  fetchManagedVaultOptions,
 } from "./managed-resources"
 
 describe("Managed resource catalog", () => {
@@ -99,6 +100,49 @@ describe("Managed resource catalog", () => {
         description: "Default runtime",
         environmentType: "cloud",
         scope: null,
+        updatedAt: "2026-07-24T00:00:00Z",
+      },
+    ])
+  })
+
+  test("returns vaults by updated time descending with a client-safe projection", async () => {
+    const client = {
+      beta: {
+        vaults: {
+          list: () =>
+            asyncItems([
+              {
+                id: "vlt_2",
+                display_name: "Support creds",
+                type: "vault",
+                archived_at: null,
+                created_at: "2026-07-20T00:00:00Z",
+                updated_at: "2026-07-25T00:00:00Z",
+                metadata: { secret: "not returned" },
+              },
+              {
+                id: "vlt_1",
+                display_name: "Shared MCP",
+                type: "vault",
+                archived_at: null,
+                created_at: "2026-07-19T00:00:00Z",
+                updated_at: "2026-07-24T00:00:00Z",
+                metadata: {},
+              },
+            ]),
+        },
+      },
+    } as unknown as Anthropic
+
+    expect(await fetchManagedVaultOptions(client)).toEqual([
+      {
+        id: "vlt_2",
+        name: "Support creds",
+        updatedAt: "2026-07-25T00:00:00Z",
+      },
+      {
+        id: "vlt_1",
+        name: "Shared MCP",
         updatedAt: "2026-07-24T00:00:00Z",
       },
     ])
