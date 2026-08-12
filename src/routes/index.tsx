@@ -83,7 +83,6 @@ import {
 import {
   VAULT_ID_PATTERN,
   type ExistingFileSessionResource,
-  type JsonRecord,
   type ManagedVaultOption,
   type MarkdownSessionResource,
   type PendingAction,
@@ -104,6 +103,11 @@ import {
   sendToolConfirmation,
   syncManagedSession,
 } from "@/lib/managed-agents-functions"
+import { presentSessionEvent } from "@/lib/session-event-presentation"
+import type {
+  SessionEventCategory,
+  SessionEventPresentation,
+} from "@/lib/session-event-presentation"
 import { cn } from "@/lib/utils"
 
 export const Route = createFileRoute("/")({ component: App })
@@ -184,6 +188,11 @@ function App() {
   const [busyLabel, setBusyLabel] = React.useState<string | null>(null)
   const [clientError, setClientError] = React.useState<string | null>(null)
   const [turnState, setTurnState] = React.useState<TurnState>("idle")
+  const [pendingMessage, setPendingMessage] = React.useState<{
+    sessionId: string
+    content: string
+    sentAt: string
+  } | null>(null)
 
   React.useEffect(() => {
     setAgentId(localStorage.getItem(STORAGE_KEYS.agentId) || "")
@@ -444,8 +453,13 @@ function App() {
 
     const content = message.trim()
     setMessage("")
+    setPendingMessage({
+      sessionId: activeSessionId,
+      content,
+      sentAt: new Date().toISOString(),
+    })
 
-    await runTurn(activeSessionId, "Sending message", () =>
+    const sent = await runTurn(activeSessionId, "Sending message", () =>
       sendMessageFn({
         data: {
           sessionId: activeSessionId,
@@ -453,6 +467,11 @@ function App() {
         },
       })
     )
+
+    setPendingMessage(null)
+    if (!sent) {
+      setMessage((current) => current || content)
+    }
   }
 
   async function confirmTool(action: PendingAction, result: "allow" | "deny") {
@@ -511,9 +530,11 @@ function App() {
       queryClient.setQueryData(["session", sessionId], detail)
       await invalidateSession(sessionId)
       setTurnState("ended")
+      return true
     } catch (error) {
       setClientError(errorMessage(error))
       setTurnState("error")
+      return false
     } finally {
       setBusyLabel(null)
     }
@@ -1049,6 +1070,21 @@ function App() {
                           </MessageScrollerItem>
                         )
                       })}
+
+                      {pendingMessage?.sessionId === activeSessionId && (
+                        <MessageScrollerItem
+                          messageId="pending-user-message"
+                          scrollAnchor
+                        >
+                          <MessageBubble
+                            role="user"
+                            title="You"
+                            text={pendingMessage.content}
+                            time={formatTime(pendingMessage.sentAt)}
+                            streaming
+                          />
+                        </MessageScrollerItem>
+                      )}
                     </MessageScrollerContent>
                   </MessageScrollerViewport>
                   <MessageScrollerButton />
@@ -1659,72 +1695,20 @@ function ActionsPanel({
 function EventRow({ event }: { event: StoredSessionEvent }) {
   const type = event.type
   const payload = event.payload
+  const presentation = presentSessionEvent(type, payload)
 
-  if (type === "user.message") {
+  if (type === "user.message" || type === "agent.message") {
     return (
       <MessageBubble
-        role="user"
-        title="You"
-        text={contentText(payload.content)}
+        role={type === "user.message" ? "user" : "agent"}
+        title={presentation.title}
+        text={presentation.body ?? ""}
         time={formatTime(event.processedAt ?? event.createdAt)}
       />
     )
   }
 
-  if (type === "agent.message") {
-    return (
-      <MessageBubble
-        role="agent"
-        title="Agent"
-        text={contentText(payload.content)}
-        time={formatTime(event.processedAt ?? event.createdAt)}
-      />
-    )
-  }
-
-  if (
-    type === "agent.tool_use" ||
-    type === "agent.mcp_tool_use" ||
-    type === "agent.custom_tool_use"
-  ) {
-    return (
-      <ToolEventCard
-        title={toolName(payload)}
-        subtitle={type}
-        input={recordValue(payload.input) ?? {}}
-      />
-    )
-  }
-
-  if (type === "session.error") {
-    const error = recordValue(payload.error)
-    return (
-      <Alert variant="destructive">
-        <AlertCircleIcon />
-        <AlertTitle>{stringValue(error?.type) ?? "session.error"}</AlertTitle>
-        <AlertDescription>
-          {stringValue(error?.message) ?? "The session reported an error."}
-        </AlertDescription>
-      </Alert>
-    )
-  }
-
-  return (
-    <div className="flex items-start gap-3 rounded-md border bg-background p-3 text-sm">
-      <TerminalIcon className="mt-0.5 size-4 shrink-0 text-muted-foreground" />
-      <div className="min-w-0 flex-1">
-        <div className="flex flex-wrap items-center gap-2">
-          <span className="font-medium">{type}</span>
-          <span className="text-xs text-muted-foreground">
-            {formatTime(event.processedAt ?? event.createdAt)}
-          </span>
-        </div>
-        <div className="mt-1 truncate text-xs text-muted-foreground">
-          {shortId(event.eventId)}
-        </div>
-      </div>
-    </div>
-  )
+  return <EventDetailsCard event={event} presentation={presentation} />
 }
 
 function MessageBubble({
@@ -1746,7 +1730,7 @@ function MessageBubble({
     >
       <div
         className={cn(
-          "max-w-[min(100%,52rem)] rounded-md border px-3 py-2 text-sm shadow-sm",
+          "max-w-[min(100%,52rem)] min-w-0 rounded-md border px-3 py-2 text-sm shadow-sm",
           role === "user"
             ? "border-primary/20 bg-primary text-primary-foreground"
             : "bg-background"
@@ -1757,7 +1741,7 @@ function MessageBubble({
           {time && <span>{time}</span>}
           {streaming && <Loader2Icon className="size-3 animate-spin" />}
         </div>
-        <div className="leading-relaxed whitespace-pre-wrap">
+        <div className="leading-relaxed [overflow-wrap:anywhere] whitespace-pre-wrap">
           {text || "(empty)"}
         </div>
       </div>
@@ -1765,31 +1749,115 @@ function MessageBubble({
   )
 }
 
-function ToolEventCard({
-  title,
-  subtitle,
-  input,
+function EventDetailsCard({
+  event,
+  presentation,
 }: {
-  title: string
-  subtitle: string
-  input: JsonRecord
+  event: StoredSessionEvent
+  presentation: SessionEventPresentation
 }) {
+  const badgeVariant =
+    presentation.tone === "danger" ? "destructive" : "outline"
+
   return (
-    <Card>
+    <Card
+      className={cn(
+        presentation.tone === "danger" && "border-destructive/40",
+        presentation.tone === "warning" &&
+          "border-amber-300/70 dark:border-amber-800"
+      )}
+    >
       <CardHeader>
         <CardTitle className="flex items-center gap-2 text-sm">
-          <TerminalIcon className="size-4 text-muted-foreground" />
-          {title}
+          <EventCategoryIcon
+            category={presentation.category}
+            tone={presentation.tone}
+          />
+          {presentation.title}
         </CardTitle>
-        <CardDescription>{subtitle}</CardDescription>
+        <CardDescription className="flex flex-wrap items-center gap-x-2 gap-y-1">
+          <span>{event.type}</span>
+          <span className="font-mono">{shortId(event.eventId)}</span>
+          <span>{formatTime(event.processedAt ?? event.createdAt)}</span>
+        </CardDescription>
+        <CardAction>
+          <Badge variant={badgeVariant}>{presentation.badge}</Badge>
+        </CardAction>
       </CardHeader>
-      <CardContent>
-        <pre className="max-h-56 overflow-auto rounded-md bg-muted p-2 text-xs">
-          {JSON.stringify(input, null, 2)}
-        </pre>
+      <CardContent className="space-y-3">
+        <p className="text-sm text-muted-foreground">
+          {presentation.description}
+        </p>
+
+        {presentation.fields.length > 0 && (
+          <dl className="grid gap-2 text-xs sm:grid-cols-2">
+            {presentation.fields.map((field) => (
+              <div key={`${field.label}-${field.value}`} className="min-w-0">
+                <dt className="text-muted-foreground">{field.label}</dt>
+                <dd className="font-mono [overflow-wrap:anywhere]">
+                  {field.value}
+                </dd>
+              </div>
+            ))}
+          </dl>
+        )}
+
+        {presentation.body && (
+          <pre className="max-h-64 overflow-auto rounded-md bg-muted p-2 text-xs leading-relaxed [overflow-wrap:anywhere] whitespace-pre-wrap">
+            {presentation.body}
+          </pre>
+        )}
+
+        {presentation.data !== undefined && (
+          <div>
+            <div className="mb-1 text-xs font-medium text-muted-foreground">
+              {presentation.dataLabel ?? "Data"}
+            </div>
+            <pre className="max-h-56 overflow-auto rounded-md bg-muted p-2 text-xs leading-relaxed [overflow-wrap:anywhere] whitespace-pre-wrap">
+              {JSON.stringify(presentation.data, null, 2)}
+            </pre>
+          </div>
+        )}
+
+        <details className="group rounded-md border bg-muted/30">
+          <summary className="flex min-h-10 cursor-pointer list-none items-center gap-2 px-3 text-xs font-medium select-none">
+            <ChevronRightIcon className="size-3 group-open:rotate-90" />
+            Raw event
+          </summary>
+          <pre className="max-h-80 overflow-auto border-t p-3 text-xs leading-relaxed [overflow-wrap:anywhere] whitespace-pre-wrap">
+            {JSON.stringify(event.payload, null, 2)}
+          </pre>
+        </details>
       </CardContent>
     </Card>
   )
+}
+
+function EventCategoryIcon({
+  category,
+  tone,
+}: {
+  category: SessionEventCategory
+  tone: SessionEventPresentation["tone"]
+}) {
+  const className = cn(
+    "size-4",
+    tone === "danger"
+      ? "text-destructive"
+      : tone === "warning"
+        ? "text-amber-600"
+        : tone === "success"
+          ? "text-emerald-600"
+          : "text-muted-foreground"
+  )
+
+  if (category === "thread") return <BotIcon className={className} />
+  if (category === "tool") return <TerminalIcon className={className} />
+  if (category === "model") return <CodeIcon className={className} />
+  if (category === "outcome") return <ShieldCheckIcon className={className} />
+  if (category === "session") return <DatabaseIcon className={className} />
+  if (category === "system") return <MessageSquareIcon className={className} />
+  return <ActivityIcon className={className} />
 }
 
 function PendingActionCard({
@@ -1876,52 +1944,6 @@ function PendingActionCard({
       </CardContent>
     </Card>
   )
-}
-
-function contentText(content: unknown) {
-  if (!Array.isArray(content)) {
-    return ""
-  }
-
-  return content
-    .map((block) => {
-      const record = recordValue(block)
-      if (!record) {
-        return ""
-      }
-
-      if (record.type === "text") {
-        return stringValue(record.text) ?? ""
-      }
-
-      return JSON.stringify(record)
-    })
-    .filter(Boolean)
-    .join("\n")
-}
-
-function toolName(payload: JsonRecord) {
-  const type = stringValue(payload.type)
-  const name = stringValue(payload.name) ?? "tool"
-  const serverName = stringValue(payload.mcp_server_name)
-
-  if (type === "agent.mcp_tool_use" && serverName) {
-    return `${serverName}.${name}`
-  }
-
-  return name
-}
-
-function recordValue(value: unknown): JsonRecord | null {
-  if (value && typeof value === "object" && !Array.isArray(value)) {
-    return value as JsonRecord
-  }
-
-  return null
-}
-
-function stringValue(value: unknown): string | null {
-  return typeof value === "string" ? value : null
 }
 
 function shortId(value: string) {
