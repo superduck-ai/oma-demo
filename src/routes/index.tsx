@@ -10,6 +10,7 @@ import {
   CodeIcon,
   DatabaseIcon,
   FileKey2Icon,
+  FileImageIcon,
   FilePlus2Icon,
   FileTextIcon,
   KeyRoundIcon,
@@ -25,6 +26,8 @@ import {
   TerminalIcon,
   Trash2Icon,
   XIcon,
+  MoonIcon,
+  SunIcon,
 } from "lucide-react"
 import * as React from "react"
 
@@ -59,6 +62,11 @@ import {
 } from "@/components/ui/message-scroller"
 import { ScrollArea } from "@/components/ui/scroll-area"
 import {
+  SelectedSessionFiles,
+  SessionFilePicker,
+} from "@/components/session-file-picker"
+import type { SessionFileResourceDraft } from "@/components/session-file-picker"
+import {
   Select,
   SelectContent,
   SelectItem,
@@ -80,17 +88,20 @@ import {
   TooltipContent,
   TooltipTrigger,
 } from "@/components/ui/tooltip"
-import {
-  VAULT_ID_PATTERN,
-  type ExistingFileSessionResource,
-  type ManagedVaultOption,
-  type MarkdownSessionResource,
-  type PendingAction,
-  type SessionDetailResponse,
-  type StoredSession,
-  type StoredSessionEvent,
+import { VAULT_ID_PATTERN } from "@/lib/managed-agents"
+import type {
+  ExistingFileSessionResource,
+  JsonRecord,
+  ManagedVaultOption,
+  MarkdownSessionResource,
+  MountedSessionFile,
+  PendingAction,
+  SessionDetailResponse,
+  StoredSession,
+  StoredSessionEvent,
 } from "@/lib/managed-agents"
 import {
+  addSessionFileResource,
   createManagedSession,
   getAppConfig,
   getSessionDetail,
@@ -98,6 +109,7 @@ import {
   listAvailableManagedEnvironments,
   listAvailableManagedVaults,
   listLocalSessions,
+  listMountedSessionFiles,
   sendCustomToolResult,
   sendSessionMessage,
   sendToolConfirmation,
@@ -109,6 +121,12 @@ import type {
   SessionEventPresentation,
 } from "@/lib/session-event-presentation"
 import { cn } from "@/lib/utils"
+import { useTheme } from "@/lib/use-theme"
+import {
+  isMarkdownFilenameValid,
+  isMountPathValid,
+  normalizeMarkdownFilename,
+} from "@/lib/session-file-validation"
 
 export const Route = createFileRoute("/")({ component: App })
 
@@ -136,12 +154,15 @@ const STORAGE_KEYS = {
 
 function App() {
   const queryClient = useQueryClient()
+  const { theme, toggleTheme } = useTheme()
   const getConfigFn = useServerFn(getAppConfig)
   const listAgentsFn = useServerFn(listAvailableManagedAgents)
   const listEnvironmentsFn = useServerFn(listAvailableManagedEnvironments)
   const listVaultsFn = useServerFn(listAvailableManagedVaults)
   const listSessionsFn = useServerFn(listLocalSessions)
   const getDetailFn = useServerFn(getSessionDetail)
+  const listMountedFilesFn = useServerFn(listMountedSessionFiles)
+  const addSessionFileResourceFn = useServerFn(addSessionFileResource)
   const createSessionFn = useServerFn(createManagedSession)
   const syncSessionFn = useServerFn(syncManagedSession)
   const sendMessageFn = useServerFn(sendSessionMessage)
@@ -154,6 +175,10 @@ function App() {
   const [activeSessionId, setActiveSessionId] = React.useState<string | null>(
     null
   )
+  const activeSessionIdRef = React.useRef(activeSessionId)
+  React.useEffect(() => {
+    activeSessionIdRef.current = activeSessionId
+  }, [activeSessionId])
   const [title, setTitle] = React.useState("")
   const [markdownResources, setMarkdownResources] = React.useState<
     Array<EditableMarkdownResource>
@@ -179,6 +204,9 @@ function App() {
   const [message, setMessage] = React.useState(
     "请用一句话介绍当前 session 可以做什么。"
   )
+  const [selectedMessageFileIds, setSelectedMessageFileIds] = React.useState<
+    Array<string>
+  >([])
   const [customToolResults, setCustomToolResults] = React.useState<
     Record<string, string>
   >({})
@@ -191,6 +219,7 @@ function App() {
   const [pendingMessage, setPendingMessage] = React.useState<{
     sessionId: string
     content: string
+    fileIds: Array<string>
     sentAt: string
   } | null>(null)
 
@@ -290,8 +319,12 @@ function App() {
       return
     }
 
-    const availableIds = new Set(vaultsQuery.data.vaults.map((vault) => vault.id))
-    setVaultIds((current) => current.filter((vaultId) => availableIds.has(vaultId)))
+    const availableIds = new Set(
+      vaultsQuery.data.vaults.map((vault) => vault.id)
+    )
+    setVaultIds((current) =>
+      current.filter((vaultId) => availableIds.has(vaultId))
+    )
   }, [vaultsQuery.data, selectionHydrated])
 
   const sessionsQuery = useQuery({
@@ -306,10 +339,22 @@ function App() {
     enabled: Boolean(activeSessionId),
   })
 
+  const mountedFilesQuery = useQuery({
+    queryKey: ["session-files", activeSessionId],
+    queryFn: () =>
+      listMountedFilesFn({ data: { sessionId: activeSessionId! } }),
+    enabled: Boolean(activeSessionId),
+  })
+
+  React.useEffect(() => {
+    setSelectedMessageFileIds([])
+  }, [activeSessionId])
+
   const activeSession = detailQuery.data?.session ?? null
   const sessions = sessionsQuery.data?.sessions ?? []
   const events = detailQuery.data?.events ?? []
   const pendingActions = detailQuery.data?.pendingActions ?? []
+  const mountedFiles = mountedFilesQuery.data?.files ?? []
   const pendingOpenActions = pendingActions.filter(
     (action) => action.status === "pending"
   )
@@ -447,31 +492,102 @@ function App() {
   }
 
   async function sendMessage() {
-    if (!activeSessionId || !message.trim()) {
+    if (
+      !activeSessionId ||
+      (!message.trim() && selectedMessageFileIds.length === 0)
+    ) {
       return
     }
 
+    const sessionId = activeSessionId
     const content = message.trim()
+    const fileIds = [...selectedMessageFileIds]
     setMessage("")
+    setSelectedMessageFileIds([])
     setPendingMessage({
-      sessionId: activeSessionId,
+      sessionId,
       content,
+      fileIds,
       sentAt: new Date().toISOString(),
     })
 
-    const sent = await runTurn(activeSessionId, "Sending message", () =>
+    const sent = await runTurn(sessionId, "Sending message", () =>
       sendMessageFn({
         data: {
-          sessionId: activeSessionId,
-          content,
+          sessionId,
+          content: content || undefined,
+          fileIds,
         },
       })
     )
 
     setPendingMessage(null)
-    if (!sent) {
+    if (!sent && activeSessionIdRef.current === sessionId) {
       setMessage((current) => current || content)
+      setSelectedMessageFileIds((current) =>
+        current.length > 0 ? current : fileIds
+      )
     }
+  }
+
+  async function addMessageFileResource(draft: SessionFileResourceDraft) {
+    if (!activeSessionId) {
+      throw new Error("Select a Session before adding a resource.")
+    }
+    const sessionId = activeSessionId
+
+    const response = await addSessionFileResourceFn({
+      data:
+        draft.type === "upload"
+          ? {
+              sessionId,
+              mountPath: draft.mountPath,
+              upload: {
+                filename: draft.file.name,
+                mimeType: draft.file.type || "application/octet-stream",
+                dataBase64: await fileToBase64(draft.file),
+              },
+            }
+          : draft.type === "file_id"
+            ? {
+                sessionId,
+                mountPath: draft.mountPath,
+                fileId: draft.fileId,
+              }
+            : {
+                sessionId,
+                mountPath: draft.mountPath,
+                markdown: {
+                  filename: draft.filename,
+                  content: draft.content,
+                },
+              },
+    })
+
+    queryClient.setQueryData<{ files: Array<MountedSessionFile> }>(
+      ["session-files", sessionId],
+      (current) => ({
+        files: [...(current?.files ?? [])]
+          .filter((file) => file.fileId !== response.file.fileId)
+          .concat(response.file)
+          .sort(
+            (left, right) =>
+              left.filename.localeCompare(right.filename) ||
+              left.fileId.localeCompare(right.fileId)
+          ),
+      })
+    )
+    void queryClient.invalidateQueries({
+      queryKey: ["session-files", sessionId],
+    })
+
+    if (activeSessionIdRef.current !== sessionId) {
+      throw new Error(
+        "The resource was added to the previous Session and was not selected here."
+      )
+    }
+
+    return response.file.fileId
   }
 
   async function confirmTool(action: PendingAction, result: "allow" | "deny") {
@@ -513,6 +629,9 @@ function App() {
     await Promise.all([
       queryClient.invalidateQueries({ queryKey: ["sessions", agentId] }),
       queryClient.invalidateQueries({ queryKey: ["session", sessionId] }),
+      queryClient.invalidateQueries({
+        queryKey: ["session-files", sessionId],
+      }),
     ])
   }
 
@@ -579,6 +698,21 @@ function App() {
                     </Button>
                   </TooltipTrigger>
                   <TooltipContent>Refresh config and catalogs</TooltipContent>
+                </Tooltip>
+                <Tooltip>
+                  <TooltipTrigger asChild>
+                    <Button
+                      size="icon-sm"
+                      variant="outline"
+                      onClick={toggleTheme}
+                    >
+                      {theme === "dark" ? <SunIcon /> : <MoonIcon />}
+                      <span className="sr-only">Toggle theme</span>
+                    </Button>
+                  </TooltipTrigger>
+                  <TooltipContent>
+                    {theme === "dark" ? "Switch to light" : "Switch to dark"}
+                  </TooltipContent>
                 </Tooltip>
               </div>
 
@@ -1066,7 +1200,10 @@ function App() {
                             messageId={messageId}
                             scrollAnchor={event.type === "user.message"}
                           >
-                            <EventRow event={event} />
+                            <EventRow
+                              event={event}
+                              mountedFiles={mountedFiles}
+                            />
                           </MessageScrollerItem>
                         )
                       })}
@@ -1080,6 +1217,10 @@ function App() {
                             role="user"
                             title="You"
                             text={pendingMessage.content}
+                            attachments={mountedFileAttachments(
+                              pendingMessage.fileIds,
+                              mountedFiles
+                            )}
                             time={formatTime(pendingMessage.sentAt)}
                             streaming
                           />
@@ -1092,10 +1233,18 @@ function App() {
               </MessageScrollerProvider>
 
               <MessageComposer
+                key={activeSessionId ?? "no-session"}
                 value={message}
+                files={mountedFiles}
+                selectedFileIds={selectedMessageFileIds}
+                filesLoading={mountedFilesQuery.isLoading}
+                filesError={mountedFilesQuery.error}
                 busy={busyLabel === "Sending message"}
                 disabled={!activeSessionId || Boolean(busyLabel)}
                 onChange={setMessage}
+                onSelectedFileIdsChange={setSelectedMessageFileIds}
+                onRefreshFiles={() => void mountedFilesQuery.refetch()}
+                onAddResource={addMessageFileResource}
                 onSubmit={() => void sendMessage()}
               />
             </div>
@@ -1311,25 +1460,13 @@ function newExistingFileResourceDraft(): ExistingFileSessionResource {
   }
 }
 
-function normalizeMarkdownFilename(filename: string) {
-  const trimmed = filename.trim()
-  if (!trimmed) {
-    return ""
-  }
-  return /\.md$/i.test(trimmed) ? trimmed : `${trimmed}.md`
-}
-
 function isMarkdownResourceDraftValid(resource: MarkdownSessionResource) {
   const filename = normalizeMarkdownFilename(resource.filename)
   const mountPath = resource.mountPath?.trim() ?? ""
 
   return (
-    filename.length > 3 &&
-    filename.length <= 255 &&
-    !/[<>:"|?*\/\\\x00-\x1f]/.test(filename.replace(/\.md$/i, "")) &&
-    mountPath.startsWith("/") &&
-    mountPath.length <= 1024 &&
-    !mountPath.split("/").some((segment) => segment === "..") &&
+    isMarkdownFilenameValid(filename) &&
+    isMountPathValid(mountPath, false) &&
     resource.content.length <= 10_000_000
   )
 }
@@ -1341,10 +1478,7 @@ function isExistingFileResourceDraftValid(
 
   return (
     /^file_[A-Za-z0-9]+$/.test(resource.fileId.trim()) &&
-    (mountPath.length === 0 ||
-      (mountPath.startsWith("/") &&
-        mountPath.length <= 1024 &&
-        !mountPath.split("/").some((segment) => segment === "..")))
+    isMountPathValid(mountPath)
   )
 }
 
@@ -1559,29 +1693,56 @@ function EmptyState() {
 
 function MessageComposer({
   value,
+  files,
+  selectedFileIds,
+  filesLoading,
+  filesError,
   busy,
   disabled,
   onChange,
+  onSelectedFileIdsChange,
+  onRefreshFiles,
+  onAddResource,
   onSubmit,
 }: {
   value: string
+  files: Array<MountedSessionFile>
+  selectedFileIds: Array<string>
+  filesLoading: boolean
+  filesError: unknown
   busy: boolean
   disabled: boolean
   onChange: (value: string) => void
+  onSelectedFileIdsChange: (fileIds: Array<string>) => void
+  onRefreshFiles: () => void
+  onAddResource: (draft: SessionFileResourceDraft) => Promise<string>
   onSubmit: () => void
 }) {
-  const canSubmit = !disabled && value.trim().length > 0
+  const canSubmit =
+    !disabled && (value.trim().length > 0 || selectedFileIds.length > 0)
 
   return (
     <div className="shrink-0 border-t bg-background/95 p-3 backdrop-blur supports-[backdrop-filter]:bg-background/85">
       <div className="mx-auto max-w-4xl">
         <div className="relative rounded-lg border bg-background shadow-sm transition-[border-color,box-shadow] focus-within:border-ring/50 focus-within:ring-3 focus-within:ring-ring/20">
+          <SelectedSessionFiles
+            files={files}
+            selectedFileIds={selectedFileIds}
+            disabled={disabled}
+            onRemove={(fileId) =>
+              onSelectedFileIdsChange(
+                selectedFileIds.filter(
+                  (selectedFileId) => selectedFileId !== fileId
+                )
+              )
+            }
+          />
           <Textarea
             aria-label="Message"
             value={value}
             disabled={disabled}
             placeholder="Message this session... (Enter to send, Shift+Enter for newline)"
-            className="max-h-40 min-h-20 resize-none overflow-y-auto border-0 bg-transparent py-3 pr-14 pl-3 shadow-none focus-visible:border-transparent focus-visible:ring-0 disabled:bg-transparent"
+            className="max-h-40 min-h-20 resize-none overflow-y-auto border-0 bg-transparent py-3 pr-24 pl-3 shadow-none focus-visible:border-transparent focus-visible:ring-0 disabled:bg-transparent"
             onChange={(event) => onChange(event.target.value)}
             onKeyDown={(event) => {
               if (
@@ -1596,6 +1757,19 @@ function MessageComposer({
               }
             }}
           />
+
+          <div className="absolute right-11 bottom-2">
+            <SessionFilePicker
+              files={files}
+              selectedFileIds={selectedFileIds}
+              loading={filesLoading}
+              error={filesError}
+              disabled={disabled}
+              onChange={onSelectedFileIdsChange}
+              onRefresh={onRefreshFiles}
+              onAddResource={onAddResource}
+            />
+          </div>
 
           <Tooltip>
             <TooltipTrigger asChild>
@@ -1692,7 +1866,13 @@ function ActionsPanel({
   )
 }
 
-function EventRow({ event }: { event: StoredSessionEvent }) {
+function EventRow({
+  event,
+  mountedFiles,
+}: {
+  event: StoredSessionEvent
+  mountedFiles: Array<MountedSessionFile>
+}) {
   const type = event.type
   const payload = event.payload
   const presentation = presentSessionEvent(type, payload)
@@ -1702,7 +1882,8 @@ function EventRow({ event }: { event: StoredSessionEvent }) {
       <MessageBubble
         role={type === "user.message" ? "user" : "agent"}
         title={presentation.title}
-        text={presentation.body ?? ""}
+        text={contentText(payload.content)}
+        attachments={contentAttachments(payload.content, mountedFiles)}
         time={formatTime(event.processedAt ?? event.createdAt)}
       />
     )
@@ -1715,12 +1896,14 @@ function MessageBubble({
   role,
   title,
   text,
+  attachments = [],
   time,
   streaming = false,
 }: {
   role: "user" | "agent"
   title: string
   text: string
+  attachments?: Array<MessageAttachment>
   time?: string
   streaming?: boolean
 }) {
@@ -1741,9 +1924,36 @@ function MessageBubble({
           {time && <span>{time}</span>}
           {streaming && <Loader2Icon className="size-3 animate-spin" />}
         </div>
-        <div className="leading-relaxed [overflow-wrap:anywhere] whitespace-pre-wrap">
-          {text || "(empty)"}
-        </div>
+        {text && (
+          <div className="leading-relaxed [overflow-wrap:anywhere] whitespace-pre-wrap">
+            {text}
+          </div>
+        )}
+        {attachments.length > 0 && (
+          <div className={cn("flex flex-wrap gap-1.5", text && "mt-2")}>
+            {attachments.map((attachment, index) => {
+              const AttachmentIcon =
+                attachment.type === "image" ? FileImageIcon : FileTextIcon
+
+              return (
+                <span
+                  key={`${attachment.type}-${attachment.fileId}-${index}`}
+                  title={attachment.fileId}
+                  className={cn(
+                    "flex max-w-full items-center gap-1.5 rounded-md border px-2 py-1 text-xs",
+                    role === "user"
+                      ? "border-primary-foreground/30 bg-primary-foreground/10"
+                      : "bg-muted"
+                  )}
+                >
+                  <AttachmentIcon className="size-3.5 shrink-0" />
+                  <span className="truncate">{attachment.filename}</span>
+                </span>
+              )
+            })}
+          </div>
+        )}
+        {!text && attachments.length === 0 && <div>(empty)</div>}
       </div>
     </div>
   )
@@ -1946,6 +2156,111 @@ function PendingActionCard({
   )
 }
 
+function contentText(content: unknown) {
+  if (typeof content === "string") {
+    return content
+  }
+
+  if (!Array.isArray(content)) {
+    return content == null ? "" : JSON.stringify(content, null, 2)
+  }
+
+  return content
+    .map((block) => {
+      const record = recordValue(block)
+      if (!record) {
+        return ""
+      }
+
+      if (record.type === "text") {
+        return stringValue(record.text) ?? ""
+      }
+
+      const source = recordValue(record.source)
+      if (
+        (record.type === "document" || record.type === "image") &&
+        source?.type === "file"
+      ) {
+        return ""
+      }
+
+      return JSON.stringify(record, null, 2)
+    })
+    .filter(Boolean)
+    .join("\n")
+}
+
+interface MessageAttachment {
+  type: "document" | "image"
+  fileId: string
+  filename: string
+}
+
+function contentAttachments(
+  content: unknown,
+  mountedFiles: Array<MountedSessionFile>
+): Array<MessageAttachment> {
+  if (!Array.isArray(content)) {
+    return []
+  }
+
+  const filesById = new Map(
+    mountedFiles.map((file) => [file.fileId, file] as const)
+  )
+  const attachments: Array<MessageAttachment> = []
+
+  for (const block of content) {
+    const record = recordValue(block)
+    const source = recordValue(record?.source)
+    const type = record?.type
+    const fileId = stringValue(source?.file_id)
+
+    if (
+      (type === "document" || type === "image") &&
+      source?.type === "file" &&
+      fileId
+    ) {
+      attachments.push({
+        type,
+        fileId,
+        filename: filesById.get(fileId)?.filename ?? fileId,
+      })
+    }
+  }
+
+  return attachments
+}
+
+function mountedFileAttachments(
+  fileIds: Array<string>,
+  mountedFiles: Array<MountedSessionFile>
+): Array<MessageAttachment> {
+  const filesById = new Map(
+    mountedFiles.map((file) => [file.fileId, file] as const)
+  )
+
+  return fileIds.map((fileId) => {
+    const file = filesById.get(fileId)
+    return {
+      type: file?.mimeType.startsWith("image/") ? "image" : "document",
+      fileId,
+      filename: file?.filename ?? fileId,
+    }
+  })
+}
+
+function recordValue(value: unknown): JsonRecord | null {
+  if (value && typeof value === "object" && !Array.isArray(value)) {
+    return value as JsonRecord
+  }
+
+  return null
+}
+
+function stringValue(value: unknown): string | null {
+  return typeof value === "string" ? value : null
+}
+
 function shortId(value: string) {
   if (value.length <= 16) {
     return value
@@ -1969,4 +2284,26 @@ function formatTime(value: string) {
 
 function errorMessage(error: unknown) {
   return error instanceof Error ? error.message : "Unexpected error"
+}
+
+function fileToBase64(file: File) {
+  return new Promise<string>((resolve, reject) => {
+    const reader = new FileReader()
+    reader.onerror = () => reject(new Error("Failed to read the selected file"))
+    reader.onload = () => {
+      const result = reader.result
+      if (typeof result !== "string") {
+        reject(new Error("Failed to encode the selected file"))
+        return
+      }
+
+      const separator = result.indexOf(",")
+      if (separator < 0) {
+        reject(new Error("Failed to encode the selected file"))
+        return
+      }
+      resolve(result.slice(separator + 1))
+    }
+    reader.readAsDataURL(file)
+  })
 }

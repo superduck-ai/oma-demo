@@ -1,11 +1,16 @@
 import { createServerFn } from "@tanstack/react-start"
 import { z } from "zod"
 
+import { VAULT_ID_PATTERN } from "@/lib/managed-agents"
+import type { JsonRecord, SessionDetailResponse } from "@/lib/managed-agents"
 import {
-  VAULT_ID_PATTERN,
-  type JsonRecord,
-  type SessionDetailResponse,
-} from "@/lib/managed-agents"
+  containsControlCharacters,
+  isMountPathValid,
+  MARKDOWN_FILENAME_PATTERN,
+} from "@/lib/session-file-validation"
+
+const MAX_UPLOAD_BYTES = 10_000_000
+const MAX_UPLOAD_BASE64_LENGTH = Math.ceil(MAX_UPLOAD_BYTES / 3) * 4
 
 const mountPathSchema = z
   .string()
@@ -13,9 +18,7 @@ const mountPathSchema = z
   .min(1)
   .max(1024)
   .refine(
-    (path) =>
-      path.startsWith("/") &&
-      !path.split("/").some((segment) => segment === ".."),
+    (path) => isMountPathValid(path, false),
     "Mount paths must be absolute and cannot contain '..'."
   )
 
@@ -39,8 +42,12 @@ const createSessionSchema = z
             .min(1)
             .max(255)
             .regex(
-              /^[^<>:"|?*\/\\\x00-\x1f]+\.md$/i,
+              MARKDOWN_FILENAME_PATTERN,
               "Markdown filenames must end in .md and contain no forbidden characters."
+            )
+            .refine(
+              (filename) => !containsControlCharacters(filename),
+              "Markdown filenames must not contain control characters."
             ),
           mountPath: mountPathSchema.optional(),
           content: z.string().max(10_000_000),
@@ -83,10 +90,79 @@ const sessionIdSchema = z.object({
   sessionId: z.string().min(1),
 })
 
-const sendMessageSchema = z.object({
-  sessionId: z.string().min(1),
-  content: z.string().min(1),
-})
+const fileIdSchema = z
+  .string()
+  .trim()
+  .regex(/^file_[A-Za-z0-9]+$/, "File IDs must use the 'file_...' format.")
+
+const sendMessageSchema = z
+  .object({
+    sessionId: z.string().min(1),
+    content: z.string().max(100_000).optional(),
+    fileIds: z.array(fileIdSchema).max(500).optional(),
+  })
+  .superRefine((data, context) => {
+    if (!data.content?.trim() && (data.fileIds?.length ?? 0) === 0) {
+      context.addIssue({
+        code: "custom",
+        message: "A message must include text or at least one file.",
+        path: ["content"],
+      })
+    }
+  })
+
+const addSessionFileResourceSchema = z
+  .object({
+    sessionId: z.string().min(1),
+    mountPath: mountPathSchema.optional(),
+    fileId: fileIdSchema.optional(),
+    upload: z
+      .object({
+        filename: z
+          .string()
+          .trim()
+          .min(1)
+          .max(255)
+          .refine(
+            (filename) =>
+              !/[\\/]/.test(filename) && !containsControlCharacters(filename),
+            "Filenames must not contain path separators or control characters."
+          ),
+        mimeType: z.string().trim().min(1).max(255),
+        dataBase64: z.string().min(1).max(MAX_UPLOAD_BASE64_LENGTH),
+      })
+      .optional(),
+    markdown: z
+      .object({
+        filename: z
+          .string()
+          .trim()
+          .min(1)
+          .max(255)
+          .regex(
+            MARKDOWN_FILENAME_PATTERN,
+            "Markdown filenames must end in .md and contain no forbidden characters."
+          )
+          .refine(
+            (filename) => !containsControlCharacters(filename),
+            "Markdown filenames must not contain control characters."
+          ),
+        content: z.string().max(MAX_UPLOAD_BYTES),
+      })
+      .optional(),
+  })
+  .superRefine((data, context) => {
+    const sourceCount = [data.fileId, data.upload, data.markdown].filter(
+      Boolean
+    ).length
+    if (sourceCount !== 1) {
+      context.addIssue({
+        code: "custom",
+        message: "Provide exactly one of fileId, upload, or markdown.",
+        path: ["fileId"],
+      })
+    }
+  })
 
 const confirmToolSchema = z.object({
   sessionId: z.string().min(1),
@@ -112,7 +188,8 @@ export const getAppConfig = createServerFn({ method: "GET" }).handler(
 export const listAvailableManagedAgents = createServerFn({
   method: "GET",
 }).handler(async () => {
-  const { fetchManagedAgentOptions } = await import("@/server/managed-resources")
+  const { fetchManagedAgentOptions } =
+    await import("@/server/managed-resources")
   return {
     agents: await withAnthropicClient(fetchManagedAgentOptions),
   }
@@ -131,7 +208,8 @@ export const listAvailableManagedEnvironments = createServerFn({
 export const listAvailableManagedVaults = createServerFn({
   method: "GET",
 }).handler(async () => {
-  const { fetchManagedVaultOptions } = await import("@/server/managed-resources")
+  const { fetchManagedVaultOptions } =
+    await import("@/server/managed-resources")
   return {
     vaults: await withAnthropicClient(fetchManagedVaultOptions),
   }
@@ -149,6 +227,69 @@ export const getSessionDetail = createServerFn({ method: "GET" })
   .handler(async ({ data }) => {
     const { getDb } = await import("@/server/db")
     return getDb().getSessionDetail(data.sessionId)
+  })
+
+export const listMountedSessionFiles = createServerFn({ method: "GET" })
+  .validator(sessionIdSchema)
+  .handler(async ({ data }) => {
+    try {
+      const { getAnthropicClient, MANAGED_AGENTS_BETAS } =
+        await import("@/server/anthropic")
+      const { fetchMountedSessionFiles } =
+        await import("@/server/session-event-files")
+
+      return {
+        files: await fetchMountedSessionFiles(
+          getAnthropicClient(),
+          data.sessionId,
+          MANAGED_AGENTS_BETAS
+        ),
+      }
+    } catch (error) {
+      throw await clientSafeError(error)
+    }
+  })
+
+export const addSessionFileResource = createServerFn({ method: "POST" })
+  .validator(addSessionFileResourceSchema)
+  .handler(async ({ data }) => {
+    try {
+      const { getAnthropicClient, MANAGED_AGENTS_BETAS } =
+        await import("@/server/anthropic")
+      const { addMountedSessionFile } =
+        await import("@/server/session-event-files")
+      const upload = data.upload
+        ? {
+            filename: data.upload.filename,
+            mimeType: data.upload.mimeType,
+            data: decodeBase64File(data.upload.dataBase64),
+          }
+        : data.markdown
+          ? {
+              filename: data.markdown.filename,
+              mimeType: "text/plain",
+              data: validateUploadBuffer(
+                Buffer.from(data.markdown.content, "utf8"),
+                true
+              ),
+            }
+          : undefined
+
+      return {
+        file: await addMountedSessionFile(
+          getAnthropicClient(),
+          data.sessionId,
+          MANAGED_AGENTS_BETAS,
+          {
+            fileId: data.fileId,
+            mountPath: data.mountPath,
+            upload,
+          }
+        ),
+      }
+    } catch (error) {
+      throw await clientSafeError(error)
+    }
   })
 
 export const createManagedSession = createServerFn({ method: "POST" })
@@ -218,16 +359,39 @@ export const sendSessionMessage = createServerFn({ method: "POST" })
   .validator(sendMessageSchema)
   .handler(async ({ data }) => {
     try {
-      return await runStreamedTurn(data.sessionId, async (client) => {
-        const sent = await client.beta.sessions.events.send(data.sessionId, {
-          betas: await managedAgentBetas(),
-          events: [
-            {
-              type: "user.message",
-              content: [{ type: "text", text: data.content }],
-            },
-          ],
-        })
+      const client = await getClientForTurn()
+      const { buildUserMessageContent, fetchMountedSessionFiles } =
+        await import("@/server/session-event-files")
+      const betas = await managedAgentBetas()
+      const fileIds = data.fileIds ?? []
+      const mountedFiles =
+        fileIds.length > 0
+          ? await fetchMountedSessionFiles(
+              client,
+              data.sessionId,
+              betas,
+              fileIds
+            )
+          : []
+      const content = buildUserMessageContent(
+        data.content,
+        fileIds,
+        mountedFiles
+      )
+
+      return await runStreamedTurn(data.sessionId, async (turnClient) => {
+        const sent = await turnClient.beta.sessions.events.send(
+          data.sessionId,
+          {
+            betas,
+            events: [
+              {
+                type: "user.message",
+                content,
+              },
+            ],
+          }
+        )
 
         const { getDb } = await import("@/server/db")
         for (const event of sent.data ?? []) {
@@ -412,4 +576,24 @@ function toJsonRecord(value: unknown): JsonRecord {
   }
 
   return {}
+}
+
+function decodeBase64File(value: string) {
+  if (value.length % 4 !== 0 || !/^[A-Za-z0-9+/]*={0,2}$/.test(value)) {
+    throw new Error("Uploaded file data is not valid base64")
+  }
+
+  return validateUploadBuffer(Buffer.from(value, "base64"))
+}
+
+function validateUploadBuffer(data: Buffer, allowEmpty = false) {
+  if ((!allowEmpty && data.length === 0) || data.length > MAX_UPLOAD_BYTES) {
+    throw new Error(
+      allowEmpty
+        ? "Uploaded files must not exceed 10 MB"
+        : "Uploaded files must be between 1 byte and 10 MB"
+    )
+  }
+
+  return data
 }

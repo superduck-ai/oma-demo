@@ -27,6 +27,11 @@ export const Route = createRootRoute({
         href: appCss,
       },
     ],
+    scripts: [
+      {
+        children: `try{var t=localStorage.getItem("oma-demo.theme");if(t==="dark"){document.documentElement.classList.add("dark")}}catch(e){}`,
+      },
+    ],
   }),
   notFoundComponent: () => (
     <main className="container mx-auto p-4 pt-16">
@@ -51,7 +56,7 @@ function RootDocument({ children }: { children: React.ReactNode }) {
   )
 
   return (
-    <html lang="en">
+    <html lang="en" suppressHydrationWarning>
       <head>
         <HeadContent />
       </head>

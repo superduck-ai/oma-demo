@@ -20,3 +20,4 @@ todos.json
 
 # typescript
 *.tsbuildinfo
+/.idea/
